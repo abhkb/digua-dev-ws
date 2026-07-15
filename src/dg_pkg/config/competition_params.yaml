@@ -1,0 +1,141 @@
+﻿# 地瓜机器人比赛自动巡航参数
+#
+# 坐标系：map
+# 当前版本：最小闭环 P -> QR -> P
+# 说明：
+#   - initial_pose 用于自动发布 /initialpose。
+#   - waypoints 中保存采集到的真实目标点。
+#   - route_minimal 用于第一阶段自动导航验收。
+#   - 后续顺/逆时针通道航点在 clockwise_route / anticlockwise_route 中追加。
+
+dg_competition:
+  map_frame: "map"
+  robot_base_frame: "base_footprint"
+
+  initial_pose:
+    name: "p_start"
+    x: 0.0
+    y: 0.0
+    z: 0.0
+    yaw: 0.0
+    orientation:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      w: 1.0
+
+  waypoints:
+    qr_stop:
+      description: "QR 任务发布点 / 扫码点"
+      x: 3.84898752119429
+      y: 1.4231222593067374
+      z: 0.0
+      yaw: 0.619159
+      yaw_deg: 35.475
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.3046580659239718
+        w: 0.952461790765102
+
+    p_return:
+      description: "返回 P 点 / 停车点"
+      ignore_yaw: true
+      post_arrival_forward_distance_m: 0.15
+      post_arrival_forward_speed_mps: 0.05
+      x: 0.06852940336751485
+      y: 0.034713022079080204
+      z: 0.0
+      yaw: -2.528319
+      yaw_deg: -144.862
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: -0.9533541937620098
+        w: 0.30185390710803844
+
+    return_mid_after_qr:
+      description: "QR 点倒车后返航过渡点"
+      x: 3.5346083850148604
+      y: 0.9745705119085102
+      z: 0.0
+      yaw: 2.216837
+      yaw_deg: 127.015
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.8949942422490728
+        w: 0.4460776909250316
+
+    task13_channel_near:
+      description: "任务 1+3：到通道附近，准备进入指定通道"
+      x: 2.271471961037522
+      y: 1.598395418190495
+      z: 0.0
+      yaw: 2.193939
+      yaw_deg: 125.703
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.8898286108572276
+        w: 0.45629490825550145
+
+    task13_channel_enter:
+      description: "任务 1+3：进入指定通道，满足任务三起点前置动作"
+      x: 1.949824351889113
+      y: 2.040365048841075
+      z: 0.0
+      yaw: 2.243994
+      yaw_deg: 128.571
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.900968748165951
+        w: 0.43388398775280845
+
+    task13_channel_exit:
+      description: "任务 1+3：从指定通道退/驶出，作为任务三返回 P 前的起点"
+      x: 2.4193276422274166
+      y: 1.4407379574359307
+      z: 0.0
+      yaw: 2.777608
+      yaw_deg: 159.145
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.9834850772166134
+        w: 0.18098923418875534
+
+  routes:
+    # 第一阶段最小闭环：按列表顺序导航。
+    # 以后增加中间点，只需要在 waypoints 中新增点，并把名字插入这里。
+    route_minimal:
+      - "qr_stop"
+      - "return_mid_after_qr"
+      - "task13_channel_near"
+      - "task13_channel_enter"
+      - "task13_channel_exit"
+      - "p_return"
+
+    # 后续扫码后，奇数二维码选择 clockwise_route。
+    clockwise_route: []
+
+    # 后续扫码后，偶数二维码选择 anticlockwise_route。
+    anticlockwise_route: []
+
+  navigation:
+    initialpose_publish_count: 5
+    initialpose_interval_sec: 0.3
+    nav_timeout_sec: 90.0
+    goal_xy_tolerance: 0.25
+    default_yaw_goal_tolerance: 0.45
+    ignore_yaw_goal_tolerance: 3.14
+    controller_server_node: "/controller_server"
+    # true：nav_cruise.py 根据相邻航点自动计算 goal yaw。
+    # false：使用每个 waypoint 中记录的 yaw / quaternion。
+    # 当前先使用踩点保存的 QR / P 点角度，避免到点朝向与采集点位不一致。
+    auto_compute_goal_yaw: false
+
+  qr:
+    clockwise_signal: 3
+    anticlockwise_signal: 4

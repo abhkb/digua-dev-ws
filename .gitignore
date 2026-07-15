@@ -1,0 +1,65 @@
+﻿# ROS2 / colcon build artifacts
+build/
+install/
+log/
+logs/
+.ros/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local tool/cache directories
+.uv-skill-cache/
+.cache/
+.tmp/
+tmp/
+src/.git_backup_before_dev_ws_root_repo/
+
+# Local agent/project memory not intended for public repositories
+.agents/
+.claude/
+AGENTS.md
+CLAUDE.md
+PROJECT_MEMORY.md
+CONVERSATION_ARCHIVE.md
+PROJECT_INDEX.md
+nav2日志.md
+明天的内容.md
+src/当前调试交接清单.md
+
+# Playwright / browser debug captures
+.playwright-cli/
+src/.playwright-cli/
+playwright-report/
+test-results/
+
+# Local Claude/Codex machine-specific settings
+src/.claude/settings.local.json
+.claude/settings.local.json
+
+# ROS bag / runtime captures
+*.bag
+*.db3
+*.mcap
+rosbag2_*/
+competition_test*/
+
+# Large/generated map artifacts can be added intentionally if needed.
+# Keep YAML and source configs tracked; ignore generated map images by default.
+*.pgm
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~

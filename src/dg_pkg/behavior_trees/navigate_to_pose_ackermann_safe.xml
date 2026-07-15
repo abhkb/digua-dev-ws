@@ -1,0 +1,68 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  navigate_to_pose_ackermann_safe.xml — 阿克曼底盘安全行为树
+
+  与默认 navigate_to_pose_w_replanning_and_recovery.xml 的区别:
+    - 移除 Spin（阿克曼不能原地旋转）
+    - 移除 BackUp（阿克曼不能自动倒车）
+    - 保留 costmap 清除（全局 + 局部）
+    - 保留 Wait 恢复（等待障碍物消失）
+    - 保留低频重规划（RateController → ComputePathToPose）
+    - 恢复策略穷尽后 Goal 失败 → /cmd_vel 归零
+
+  适用: Nav2 1.1.x (Humble) + RegulatedPurePursuitController
+  维护者: Claude Code（M10 阿克曼安全补丁）
+-->
+
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <!--
+      NavigateRecovery: 外层恢复节点，最多 6 次重试
+      当 PipelineSequence 任一环节失败时，执行 RecoveryFallback 中的恢复动作
+    -->
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <!--
+        PipelineSequence: 先规划路径，再跟踪路径。
+        任一步骤失败 → 触发外层 RecoveryNode 的恢复动作
+      -->
+      <PipelineSequence name="NavigateWithReplanning">
+        <!--
+          0.333Hz 重规划: 约每 3 秒调用一次 ComputePathToPose
+          降低行驶中频繁换路径导致的打方向/倒车换向抖动
+          规划失败时清除全局代价地图后重试 1 次
+        -->
+        <RateController hz="0.333">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+
+        <!--
+          路径跟踪: 失败时清除局部代价地图后重试 1 次
+          注意: 不使用 Spin 或 BackUp（阿克曼底盘安全约束）
+        -->
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+
+      <!--
+        RecoveryFallback: 逐项尝试恢复动作
+        - GoalUpdated 检查是否收到新目标点
+        - RoundRobin 轮询恢复动作: 清除全局/局部代价地图 → 等待
+        - 移除 Spin 和 BackUp: 阿克曼底盘不能原地旋转或自动倒车
+      -->
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <ClearEntireCostmap name="ClearGlobalCostmap-Recovery" service_name="global_costmap/clear_entirely_global_costmap"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Recovery" service_name="local_costmap/clear_entirely_local_costmap"/>
+          <Wait wait_duration="5"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>
