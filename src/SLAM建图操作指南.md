@@ -42,12 +42,16 @@ ros2 pkg list | grep slam_toolbox
 # 应输出: slam_toolbox
 ```
 
+
+
 ### 1.3 安装键盘遥控（RDK 端，用于手动控制建图）
 
 ```bash
 source /opt/tros/humble/setup.bash
 sudo apt install ros-${ROS_DISTRO}-teleop-twist-keyboard -y
 ```
+
+
 
 ### 1.4 确认串口设备
 
@@ -73,6 +77,8 @@ sudo chmod 777 /dev/ttyACM1
 
 ---
 
+
+
 ## 2. 编译工作空间
 
 ```bash
@@ -95,6 +101,8 @@ echo "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" >> ~/.bashrc
 ```
 
 ---
+
+
 
 ## 3. 创建 SLAM 参数文件
 
@@ -180,6 +188,8 @@ EOF
 
 ---
 
+
+
 ## 4. 确认 TF 坐标变换
 
 建图前需确认完整的 TF 树。2026-06-26 已根据实车三视图和 RViz
@@ -191,6 +201,8 @@ map → odom → base_footprint → base_link → laser
 slam   EKF       静态TF         静态TF      静态TF
 发布  发布       (0,0,0)        URDF       (0.036,0,0.155)
 ```
+
+
 
 ### 4.1 雷达 TF 要求（N10 文档原文）
 
@@ -213,6 +225,8 @@ slam   EKF       静态TF         静态TF      静态TF
 > ```
 >
 > 其中 `0 0 0.15` 需要根据雷达实际安装高度和位置修改。
+
+
 
 ### 4.2 本项目已修正的 OriginCar TF
 
@@ -248,9 +262,13 @@ base_link -> laser: [0.036, 0.000, 0.155]
 
 ---
 
+
+
 ## 5. N10 雷达参数参考
 
 > 以下参数说明来自 [N10 官方文档](https://origincar.guyuehome.com/application/n10_lidar_ros2_package_usage/)，配置文件位于 `lslidar_driver/config/lslidar_n10_uart.yaml`。
+
+
 
 ### 5.1 关键参数确认
 
@@ -278,6 +296,8 @@ x10:
       max_range: 50.0                    # 最大有效距离 (m)，slam_toolbox 取 20m 即可
 ```
 
+
+
 ### 5.2 角度屏蔽配置
 
 如果车身结构遮挡雷达部分角度，可屏蔽：
@@ -296,6 +316,8 @@ angle_disable_min: [0, 18000]
 angle_disable_max: [9000, 27000]
 ```
 
+
+
 ### 5.3 参数修改后注意事项
 
 > **Attention**: 修改 `config/*.yaml` 参数后，需重新编译并 source 环境：
@@ -308,13 +330,19 @@ angle_disable_max: [9000, 27000]
 
 ---
 
+
+
 ## 6. SLAM 建图操作
+
+
 
 ### 6.1 创建地图保存目录
 
 ```bash
 mkdir -p ~/maps
 ```
+
+
 
 ### 6.2 启动建图（6 个 RDK 终端）
 
@@ -324,6 +352,8 @@ mkdir -p ~/maps
 sudo pkill -9 -f ros2
 ros2 daemon stop && ros2 daemon start
 ```
+
+
 
 #### 终端 1（RDK）：启动底盘 + 传感器（禁用默认 EKF）
 
@@ -358,6 +388,8 @@ source /opt/tros/humble/setup.bash
 ros2 topic echo /odom_combined --once  # 应有数据
 ```
 
+
+
 #### 终端 3（RDK）：启动 N10 激光雷达
 
 ```bash
@@ -379,6 +411,8 @@ ros2 topic echo /scan --once --field range_min  # 应输出 0.15
 
 > **如果 /scan 无数据**：检查串口权限 (`sudo chmod 777 /dev/ttyACM1`)，确认 `lslidar_n10_uart.yaml` 中 `serial_port` 正确。
 
+
+
 #### 终端 4（RDK）：启动 SLAM Toolbox
 
 ```bash
@@ -397,6 +431,8 @@ ros2 launch slam_toolbox online_sync_launch.py \
 Registering sensor: [Custom Described Lidar]
 ```
 
+
+
 #### 终端 5（RDK）：键盘遥控建图
 
 ```bash
@@ -405,6 +441,8 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard
 ```
 
 > **OriginCar 是阿克曼底盘**，键盘控制方式与差速底盘略有不同。建议使用低速度（~0.15 m/s）缓慢行驶。
+
+
 
 #### 终端 6（RDK）：Rviz2 可视化
 
@@ -453,6 +491,8 @@ rviz2
 
 ---
 
+
+
 ### 6.3 建图步骤
 
 1. 将车模放置在 **P 点**（发车点）
@@ -468,6 +508,8 @@ rviz2
 6. **回环检测**：让车模回到起点附近，帮助 slam_toolbox 优化地图
 
 ---
+
+
 
 ## 7. 保存地图
 
@@ -510,6 +552,8 @@ free_thresh: 0.25
 
 ---
 
+
+
 ## 8. 地图验证（可选）
 
 使用项目自定义 Navigation2 加载地图进行导航测试。
@@ -551,46 +595,59 @@ rviz2 -d /root/slam.rviz
 ```
 
 **TF 树**（标准 Nav2 结构）：
+
 ```
 map → odom → base_footprint → base_link → laser
   ↑     ↑          ↑              ↑          ↑
 AMCL   EKF      静态TF          静态TF     静态TF
 ```
 
+
+
 ### 启动后操作
 
 在 RViz2 中：
+
 1. Fixed Frame 设为 `map`，添加 Map、LaserScan、TF、RobotModel、Path
 2. 先用 **"2D Pose Estimate"** 点击小车在地图上的实际位置和朝向（激活 AMCL）
 3. 再用 **"Navigation2 Goal"** 设目标点，验证路径规划
 
+
+
 ### 8.1 常见问题
 
-| 现象 | 原因 | 解决 |
-|------|------|------|
-| `frame 'odom' does not exist` | EKF 未启动或 `odom_frame` 不是 `odom` | 确认 EKF 终端带 `-r odometry/filtered:=odom_combined`；确认 `grep odom_frame /userdata/dev_ws/src/ekf_no_imu_yaw.yaml` 输出 `odom` 而非 `odom_combined` |
-| `frame 'map' does not exist` | AMCL 未收到初始位姿 | 在 RViz2 用 **"2D Pose Estimate"** 点击小车位置和朝向 |
-| `Timed out waiting for transform from base_link to map` | 同上一项，AMCL 还没发布 `map→odom` | 同上，设置初始位姿后自动消失 |
-| RViz2 只有雷达图没有地图 | Fixed Frame 是 `laser` | Global Options → Fixed Frame 改为 `map`，再 Add → Map（topic: `/map`） |
-| Nav2 一切正常但路径规划偶尔失败 | AMCL 粒子滤波收敛需要好的初始位姿 | 确保 "2D Pose Estimate" 位置和朝向尽量准确；或让小车稍移动几厘米辅助收敛 |
-| **PC 改了 YAML 但 RDK 上不生效** | RDK 和 PC 文件不同步，RDK 上跑的是旧文件 | **每次改参数后先在 RDK 上 `cat` 确认内容**，不要假设文件已同步 |
+
+| 现象                                                      | 原因                              | 解决                                                                                                                                          |
+| ------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `frame 'odom' does not exist`                           | EKF 未启动或 `odom_frame` 不是 `odom` | 确认 EKF 终端带 `-r odometry/filtered:=odom_combined`；确认 `grep odom_frame /userdata/dev_ws/src/ekf_no_imu_yaw.yaml` 输出 `odom` 而非 `odom_combined` |
+| `frame 'map' does not exist`                            | AMCL 未收到初始位姿                    | 在 RViz2 用 **"2D Pose Estimate"** 点击小车位置和朝向                                                                                                  |
+| `Timed out waiting for transform from base_link to map` | 同上一项，AMCL 还没发布 `map→odom`       | 同上，设置初始位姿后自动消失                                                                                                                              |
+| RViz2 只有雷达图没有地图                                         | Fixed Frame 是 `laser`           | Global Options → Fixed Frame 改为 `map`，再 Add → Map（topic: `/map`）                                                                            |
+| Nav2 一切正常但路径规划偶尔失败                                      | AMCL 粒子滤波收敛需要好的初始位姿             | 确保 "2D Pose Estimate" 位置和朝向尽量准确；或让小车稍移动几厘米辅助收敛                                                                                              |
+| **PC 改了 YAML 但 RDK 上不生效**                               | RDK 和 PC 文件不同步，RDK 上跑的是旧文件      | **每次改参数后先在 RDK 上** `cat` **确认内容**，不要假设文件已同步                                                                                                 |
+
+
+
 
 ### 8.2 调试方法论（逐层验证）
 
 > **核心原则**：导航失败时不要猜测，逐层验证节点→话题→TF 每一步是否正常。
 > 不要跳过任何一层，每一层通过后才进入下一层。
 
-| 层级 | 新增内容 | 关键验证命令 |
-|------|---------|-------------|
-| L1 底盘 | 基础节点 + 静态 TF | `ros2 node list`, `ros2 topic list`, `ros2 run tf2_tools view_frames` |
-| L2 EKF | `odom→base_footprint` TF + `/odom_combined` 话题 | `ros2 topic echo /odom_combined --once \| grep frame_id`（必须是 `odom`） |
-| L3 雷达 | `/scan` 话题 | `ros2 topic hz /scan`（应 ~10Hz） |
+
+| 层级          | 新增内容                                                           | 关键验证命令                                                                          |
+| ----------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| L1 底盘       | 基础节点 + 静态 TF                                                   | `ros2 node list`, `ros2 topic list`, `ros2 run tf2_tools view_frames`           |
+| L2 EKF      | `odom→base_footprint` TF + `/odom_combined` 话题                 | `ros2 topic echo /odom_combined --once | grep frame_id`（必须是 `odom`）             |
+| L3 雷达       | `/scan` 话题                                                     | `ros2 topic hz /scan`（应 ~10Hz）                                                  |
 | L4 laser TF | `base_link→laser` TF（由修正后的 `origincar_bringup.launch.py` 自动发布） | `timeout 5 ros2 run tf2_ros tf2_echo base_link laser`（确认约为 `[0.036, 0, 0.155]`） |
-| L5 Nav2 | map_server + AMCL + planner/controller | `ros2 node list \| grep -E "map\|amcl"`, `ros2 topic echo /map --once` |
-| L6 初始位姿 | `map→odom` TF（AMCL 发布） | RViz2 "2D Pose Estimate" 后 `ros2 run tf2_tools view_frames` |
-| L7 导航目标 | 路径规划 + 运动控制 | RViz2 "Navigation2 Goal" |
+| L5 Nav2     | map_server + AMCL + planner/controller                         | `ros2 node list | grep -E "map|amcl"`, `ros2 topic echo /map --once`            |
+| L6 初始位姿     | `map→odom` TF（AMCL 发布）                                         | RViz2 "2D Pose Estimate" 后 `ros2 run tf2_tools view_frames`                     |
+| L7 导航目标     | 路径规划 + 运动控制                                                    | RViz2 "Navigation2 Goal"                                                        |
+
 
 **每一层的预期 TF 树**：
+
 ```
 L1: (无 odom 帧)
 L2: odom → base_footprint → base_link → (无 laser)
@@ -600,6 +657,8 @@ L6: map → odom → base_footprint → base_link → laser   ← 完整链路
 ```
 
 ---
+
+
 
 ## 9. 一键启动脚本（可选）
 
@@ -664,26 +723,30 @@ chmod +x ~/slam_mapping.sh
 
 ---
 
+
+
 ## 10. 常见问题排查
 
 
-| 问题                        | 原因                    | 解决方法                                                                                            |
-| ------------------------- | --------------------- | ----------------------------------------------------------------------------------------------- |
-| N10 雷达无 `/scan` 数据        | 串口权限不足或端口不对           | `sudo chmod 777 /dev/ttyACM1`，检查 `lslidar_n10_uart.yaml` 中 `serial_port` 和 `publish_scan: true` |
-| `open_port ERROR`         | 串口被占用或权限不足            | `sudo chmod 777 /dev/ttyACM1`；确认无其他进程占用串口                                                       |
-| 雷达数据断断续续                  | USB 供电不足 / 波特率不对      | N10 波特率=230400；使用独立供电 USB Hub                                                                   |
+| 问题                        | 原因                                                            | 解决方法                                                                                                                                        |
+| ------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| N10 雷达无 `/scan` 数据        | 串口权限不足或端口不对                                                   | `sudo chmod 777 /dev/ttyACM1`，检查 `lslidar_n10_uart.yaml` 中 `serial_port` 和 `publish_scan: true`                                             |
+| `open_port ERROR`         | 串口被占用或权限不足                                                    | `sudo chmod 777 /dev/ttyACM1`；确认无其他进程占用串口                                                                                                   |
+| 雷达数据断断续续                  | USB 供电不足 / 波特率不对                                              | N10 波特率=230400；使用独立供电 USB Hub                                                                                                               |
 | `slam_toolbox` 报 TF 超时    | EKF 未启动，或 `slam_toolbox_params.yaml` 中 `odom_frame` 与 EKF 不一致 | **第一步**：`grep odom_frame /userdata/dev_ws/src/slam_toolbox_params.yaml`（必须是 `odom`，不能是 `odom_combined`）；**第二步**：确认 EKF 运行且 `frame_id: odom` |
-| 地图重影/错位                   | 雷达安装位置与 TF 不一致        | 先确认 `base_link → laser` 为 `(0.036,0,0.155)`；如仍错位，再按实车微调 `origincar_bringup.launch.py` 并重建 `origincar_base` |
-| 建图时机器人定位漂移                | 里程计累积误差               | 确保 EKF 正常运行，检查 `/imu/data_raw` 和 `/odom` 话题                                                     |
-| **地图持续旋转/雷达图旋转**          | IMU 陀螺零偏导致 EKF yaw 漂移 | 使用 `ekf_no_imu_yaw.yaml`（禁用 IMU yaw）+ `carto_slam:=true` 启动底盘，详见 6.2 节                          |
-| 键盘不能控制小车                  | `cmd_vel` 话题不通        | 检查底盘串口 `/dev/ttyACM0`，确认 `base_serial` 节点运行                                           |
-| 编译报错 `diagnostic_updater` | 缺少依赖                  | `sudo apt install ros-$ROS_DISTRO-diagnostic-updater -y`                                        |
-| 修改参数后不生效                  | 未重新编译                 | 修改 YAML 后执行 `colcon build --packages-select lslidar_driver && source install/setup.bash`        |
-| 地图保存失败                    | `nav2_map_server` 未安装 | `sudo apt install ros-${ROS_DISTRO}-nav2-map-server -y`                                         |
-| N10 不旋转                   | 供电问题                  | 检查 USB 供电是否足够（≥5V 1A），尝试换 USB 口                                                                 |
+| 地图重影/错位                   | 雷达安装位置与 TF 不一致                                                | 先确认 `base_link → laser` 为 `(0.036,0,0.155)`；如仍错位，再按实车微调 `origincar_bringup.launch.py` 并重建 `origincar_base`                                  |
+| 建图时机器人定位漂移                | 里程计累积误差                                                       | 确保 EKF 正常运行，检查 `/imu/data_raw` 和 `/odom` 话题                                                                                                 |
+| **地图持续旋转/雷达图旋转**          | IMU 陀螺零偏导致 EKF yaw 漂移                                         | 使用 `ekf_no_imu_yaw.yaml`（禁用 IMU yaw）+ `carto_slam:=true` 启动底盘，详见 6.2 节                                                                      |
+| 键盘不能控制小车                  | `cmd_vel` 话题不通                                                | 检查底盘串口 `/dev/ttyACM0`，确认 `base_serial` 节点运行                                                                                                 |
+| 编译报错 `diagnostic_updater` | 缺少依赖                                                          | `sudo apt install ros-$ROS_DISTRO-diagnostic-updater -y`                                                                                    |
+| 修改参数后不生效                  | 未重新编译                                                         | 修改 YAML 后执行 `colcon build --packages-select lslidar_driver && source install/setup.bash`                                                    |
+| 地图保存失败                    | `nav2_map_server` 未安装                                         | `sudo apt install ros-${ROS_DISTRO}-nav2-map-server -y`                                                                                     |
+| N10 不旋转                   | 供电问题                                                          | 检查 USB 供电是否足够（≥5V 1A），尝试换 USB 口                                                                                                             |
 
 
 ---
+
+
 
 ## 11. 总结
 

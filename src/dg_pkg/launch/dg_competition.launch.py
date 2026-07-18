@@ -53,6 +53,11 @@ def generate_launch_description():
         default_value='2',
         description='二维码连续识别去抖帧数',
     )
+    declare_qr_scan_start_delay_sec = DeclareLaunchArgument(
+        'qr_scan_start_delay_sec',
+        default_value='15.0',
+        description='qrcode_detector 启动后延迟多少秒才开始识别',
+    )
     declare_autostart = DeclareLaunchArgument(
         'autostart',
         default_value='true',
@@ -68,6 +73,11 @@ def generate_launch_description():
         default_value='60.0',
         description='到达 QR 点后等待二维码方向信号的超时时间，0 表示不超时',
     )
+    declare_start_delay_sec = DeclareLaunchArgument(
+        'start_delay_sec',
+        default_value='-1.0',
+        description='Nav2 就绪并发布 initialpose 后，等待多少秒再发送第一个导航目标；-1 表示使用 competition_params.yaml',
+    )
 
     qrcode_detector = Node(
         package='dg_pkg',
@@ -79,6 +89,10 @@ def generate_launch_description():
             'debounce_frames': ParameterValue(
                 LaunchConfiguration('debounce_frames'),
                 value_type=int,
+            ),
+            'scan_start_delay_sec': ParameterValue(
+                LaunchConfiguration('qr_scan_start_delay_sec'),
+                value_type=float,
             ),
         }],
     )
@@ -110,6 +124,10 @@ def generate_launch_description():
                 LaunchConfiguration('qr_wait_timeout_sec'),
                 value_type=float,
             ),
+            'start_delay_sec': ParameterValue(
+                LaunchConfiguration('start_delay_sec'),
+                value_type=float,
+            ),
         }],
     )
 
@@ -118,9 +136,11 @@ def generate_launch_description():
         declare_start_qrcode,
         declare_start_display,
         declare_debounce_frames,
+        declare_qr_scan_start_delay_sec,
         declare_autostart,
         declare_publish_initial_pose,
         declare_qr_wait_timeout_sec,
+        declare_start_delay_sec,
         qrcode_detector,
         qr_result_display,
         nav_cruise,

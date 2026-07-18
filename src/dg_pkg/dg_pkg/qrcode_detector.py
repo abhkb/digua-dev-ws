@@ -12,6 +12,7 @@ QR码检测节点 — 识别二维码数字内容，按奇偶判定 ClockWise / 
 参数:
   camera_topic      — 压缩图像话题名 (默认 "/image")
   debounce_frames   — 连续 N 帧结果一致才确认方向 (默认 5)
+  scan_start_delay_sec — 节点启动后延迟多少秒才开始识别 (默认 15.0)
 
 方向判定规则:
   - 二维码内容为 1~9999 的整数
@@ -21,6 +22,8 @@ QR码检测节点 — 识别二维码数字内容，按奇偶判定 ClockWise / 
 
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+import time
 
 import cv2
 import numpy as np
@@ -49,6 +52,7 @@ class QRCodeDetector(Node):
         # 参数
         self.declare_parameter('camera_topic', '/image')
         self.declare_parameter('debounce_frames', 5)
+        self.declare_parameter('scan_start_delay_sec', 15.0)
 
         camera_topic = self.get_parameter(
             'camera_topic'
@@ -57,6 +61,14 @@ class QRCodeDetector(Node):
         self.debounce_frames = self.get_parameter(
             'debounce_frames'
         ).value
+        self.scan_start_delay_sec = max(
+            0.0,
+            float(self.get_parameter('scan_start_delay_sec').value)
+        )
+        self.scan_enable_time = (
+            time.monotonic() + self.scan_start_delay_sec
+        )
+        self.scan_enabled_logged = self.scan_start_delay_sec <= 0.0
 
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -102,7 +114,8 @@ class QRCodeDetector(Node):
             f'QR码检测节点启动 — 订阅: {camera_topic}, '
             f'信号发布: /sign_foxglove, '
             f'原始数据发布: /qr_code/data, '
-            f'去抖帧数: {self.debounce_frames}'
+            f'去抖帧数: {self.debounce_frames}, '
+            f'识别启动延迟: {self.scan_start_delay_sec:.1f}s'
         )
 
     def publish_sign(self, value):
@@ -120,6 +133,13 @@ class QRCodeDetector(Node):
         self.direction_publisher.publish(direction_msg)
 
     def image_callback(self, msg):
+
+        if time.monotonic() < self.scan_enable_time:
+            return
+
+        if not self.scan_enabled_logged:
+            self.scan_enabled_logged = True
+            self.get_logger().info('二维码识别延迟结束，开始扫描')
 
         try:
             np_arr = np.frombuffer(msg.data, np.uint8)

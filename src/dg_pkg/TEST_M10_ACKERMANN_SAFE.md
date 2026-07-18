@@ -49,7 +49,7 @@
 
 | # | 需求 | 状态 | 实现方式 |
 |---|------|------|----------|
-| 1 | BT 保留 ComputePathToPose、FollowPath、1Hz 重规划 | ✅ | RateController hz="1.0" + ComputePathToPose + FollowPath |
+| 1 | BT 保留 ComputePathToPose、FollowPath、低频重规划 | ✅ | RateController hz="0.333" + ComputePathToPose + FollowPath |
 | 2 | 可以保留清除 costmap | ✅ | ClearGlobalCostmap + ClearLocalCostmap（子树 + 恢复均保留） |
 | 3 | 严禁 Spin 和 BackUp | ✅ | BT XML 无 Spin/BackUp 节点；behavior_plugins 无 spin/backup 插件 |
 | 4 | behavior_server 只保留 wait | ✅ | `behavior_plugins: ["wait"]`，spin/backup 配置块已删除 |
@@ -67,7 +67,7 @@
 ```
 RecoveryNode (retries=6, "NavigateRecovery")
 ├── PipelineSequence ("NavigateWithReplanning")
-│   ├── RateController (1.0 Hz)
+│   ├── RateController (0.333 Hz，约每 3 秒)
 │   │   └── RecoveryNode (retries=1, "ComputePathToPose")
 │   │       ├── ComputePathToPose → 成功继续
 │   │       └── ClearGlobalCostmap-Subtree → 重试 1 次

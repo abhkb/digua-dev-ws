@@ -1,7 +1,7 @@
 ﻿# 地瓜机器人比赛自动巡航参数
 #
 # 坐标系：map
-# 当前版本：最小闭环 P -> QR -> P
+# 当前版本：任务 1+3 最小闭环 P -> QR -> 指定通道进退 -> P
 # 说明：
 #   - initial_pose 用于自动发布 /initialpose。
 #   - waypoints 中保存采集到的真实目标点。
@@ -27,32 +27,32 @@ dg_competition:
   waypoints:
     qr_stop:
       description: "QR 任务发布点 / 扫码点"
-      x: 3.84898752119429
-      y: 1.4231222593067374
+      x: 3.8242361932231477
+      y: 1.372623846549827
       z: 0.0
-      yaw: 0.619159
-      yaw_deg: 35.475
+      yaw: 0.562951
+      yaw_deg: 32.255
       orientation:
         x: 0.0
         y: 0.0
-        z: 0.3046580659239718
-        w: 0.952461790765102
+        z: 0.2777735945982985
+        w: 0.9606465687982965
 
     p_return:
       description: "返回 P 点 / 停车点"
       ignore_yaw: true
       post_arrival_forward_distance_m: 0.15
       post_arrival_forward_speed_mps: 0.05
-      x: 0.06852940336751485
-      y: 0.034713022079080204
+      x: 0.047047394274798364
+      y: -0.0013009601122881778
       z: 0.0
-      yaw: -2.528319
-      yaw_deg: -144.862
+      yaw: -2.615785
+      yaw_deg: -149.873
       orientation:
         x: 0.0
         y: 0.0
-        z: -0.9533541937620098
-        w: 0.30185390710803844
+        z: -0.9656394267554317
+        w: 0.25988554691525506
 
     return_mid_after_qr:
       description: "QR 点倒车后返航过渡点"
@@ -69,42 +69,23 @@ dg_competition:
 
     task13_channel_near:
       description: "任务 1+3：到通道附近，准备进入指定通道"
-      x: 2.271471961037522
-      y: 1.598395418190495
+      post_arrival_settle_sec: 1.2
+      post_arrival_forward_distance_m: 0.55
+      post_arrival_forward_speed_mps: 0.20
+      post_arrival_reverse_distance_m: 0.55
+      post_arrival_reverse_speed_mps: 0.20
+      # 前进结束后保持零速，给底盘留出正转切换到反转的时间。
+      post_arrival_direction_change_pause_sec: 1.0
+      x: 2.2959826696340824
+      y: 1.6753652565703052
       z: 0.0
-      yaw: 2.193939
-      yaw_deg: 125.703
+      yaw: 2.433013
+      yaw_deg: 139.401
       orientation:
         x: 0.0
         y: 0.0
-        z: 0.8898286108572276
-        w: 0.45629490825550145
-
-    task13_channel_enter:
-      description: "任务 1+3：进入指定通道，满足任务三起点前置动作"
-      x: 1.949824351889113
-      y: 2.040365048841075
-      z: 0.0
-      yaw: 2.243994
-      yaw_deg: 128.571
-      orientation:
-        x: 0.0
-        y: 0.0
-        z: 0.900968748165951
-        w: 0.43388398775280845
-
-    task13_channel_exit:
-      description: "任务 1+3：从指定通道退/驶出，作为任务三返回 P 前的起点"
-      x: 2.4193276422274166
-      y: 1.4407379574359307
-      z: 0.0
-      yaw: 2.777608
-      yaw_deg: 159.145
-      orientation:
-        x: 0.0
-        y: 0.0
-        z: 0.9834850772166134
-        w: 0.18098923418875534
+        z: 0.9378931802808568
+        w: 0.34692417382284035
 
   routes:
     # 第一阶段最小闭环：按列表顺序导航。
@@ -113,8 +94,6 @@ dg_competition:
       - "qr_stop"
       - "return_mid_after_qr"
       - "task13_channel_near"
-      - "task13_channel_enter"
-      - "task13_channel_exit"
       - "p_return"
 
     # 后续扫码后，奇数二维码选择 clockwise_route。
@@ -126,6 +105,9 @@ dg_competition:
   navigation:
     initialpose_publish_count: 5
     initialpose_interval_sec: 0.3
+    # 发车延迟：Nav2 action server 就绪并发布 initialpose 后，
+    # nav_cruise 等待该秒数再发送第一个导航目标。
+    start_delay_sec: 4.0
     nav_timeout_sec: 90.0
     goal_xy_tolerance: 0.25
     default_yaw_goal_tolerance: 0.45
@@ -139,3 +121,5 @@ dg_competition:
   qr:
     clockwise_signal: 3
     anticlockwise_signal: 4
+    # 前往 qr_stop 途中一旦识别到有效二维码，取消该目标并继续下一点。
+    skip_qr_goal_on_signal: true

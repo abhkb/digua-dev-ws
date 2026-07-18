@@ -7,8 +7,9 @@ Flow:
   1. Publish the fixed initial pose at P.
   2. Navigate to the QR waypoint with Nav2 NavigateToPose.
   3. Wait for `/sign_foxglove` to become 3 or 4.
-  4. Navigate back to P.
-  5. Publish zero `/cmd_vel` and finish.
+  4. Follow the configured waypoint route, including optional post-arrival
+     straight motions.
+  5. Return to P, publish zero `/cmd_vel`, and finish.
 
 This node intentionally implements only the first closed loop
 `P -> QR -> P`. Channel patrol and VLM are added later after this
@@ -57,6 +58,7 @@ class NavCruise(Node):
         self.declare_parameter('qr_signal_topic', '/sign_foxglove')
         self.declare_parameter('state_topic', '/competition/state')
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
+        self.declare_parameter('start_delay_sec', -1.0)
         self.declare_parameter('qr_wait_timeout_sec', 60.0)
         self.declare_parameter('action_server_timeout_sec', 20.0)
         self.declare_parameter('stop_cmd_count', 10)
@@ -72,6 +74,9 @@ class NavCruise(Node):
         self.qr_signal_topic = self.get_parameter('qr_signal_topic').value
         self.state_topic = self.get_parameter('state_topic').value
         self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
+        self.start_delay_sec = float(
+            self.get_parameter('start_delay_sec').value
+        )
         self.qr_wait_timeout_sec = float(
             self.get_parameter('qr_wait_timeout_sec').value
         )
@@ -98,6 +103,10 @@ class NavCruise(Node):
         self.initialpose_interval_sec = float(
             self.navigation.get('initialpose_interval_sec', 0.3)
         )
+        if self.start_delay_sec < 0.0:
+            self.start_delay_sec = float(
+                self.navigation.get('start_delay_sec', 4.0)
+            )
         self.nav_timeout_sec = float(
             self.navigation.get('nav_timeout_sec', 90.0)
         )
@@ -116,6 +125,9 @@ class NavCruise(Node):
         self.clockwise_signal = int(self.qr_config.get('clockwise_signal', 3))
         self.anticlockwise_signal = int(
             self.qr_config.get('anticlockwise_signal', 4)
+        )
+        self.skip_qr_goal_on_signal = bool(
+            self.qr_config.get('skip_qr_goal_on_signal', True)
         )
 
         self.latest_qr_signal = None
@@ -289,6 +301,14 @@ class NavCruise(Node):
             return 'AntiClockWise'
         return 'unknown'
 
+    def _has_valid_qr_signal(self):
+        """Return whether a valid competition QR direction is available."""
+
+        return self.latest_qr_signal in (
+            self.clockwise_signal,
+            self.anticlockwise_signal,
+        )
+
     def _quaternion_from_yaw(self, yaw):
         q = Quaternion()
         q.x = 0.0
@@ -388,7 +408,37 @@ class NavCruise(Node):
                 f'Nav2 action server not available: {self.nav_action_name}'
             )
 
-    def navigate_to(self, waypoint_name, previous_pose):
+    def wait_start_delay(self):
+        """Wait before sending the first Nav2 goal."""
+
+        if self.start_delay_sec <= 0.0:
+            return
+
+        self._publish_state('START_DELAY')
+        self.get_logger().info(
+            f'发车倒计时 {self.start_delay_sec:.1f}s：'
+            '倒计时结束后发送第一个导航目标'
+        )
+
+        start_time = time.monotonic()
+        last_remaining = None
+        while rclpy.ok():
+            elapsed = time.monotonic() - start_time
+            remaining = self.start_delay_sec - elapsed
+            if remaining <= 0.0:
+                break
+
+            remaining_int = int(math.ceil(remaining))
+            if remaining_int != last_remaining:
+                self.get_logger().info(f'发车倒计时: {remaining_int}s')
+                last_remaining = remaining_int
+
+            rclpy.spin_once(self, timeout_sec=0.1)
+
+        self.get_logger().info('发车倒计时结束，开始自动巡航')
+
+    def navigate_to(
+            self, waypoint_name, previous_pose, stop_on_qr_signal=False):
         self._apply_waypoint_goal_tolerance(waypoint_name)
         waypoint = self.waypoints[waypoint_name]
         pose = self._make_pose_stamped(waypoint_name, previous_pose)
@@ -417,6 +467,14 @@ class NavCruise(Node):
         last_log_time = 0.0
 
         while rclpy.ok() and not result_future.done():
+            if stop_on_qr_signal and self._has_valid_qr_signal():
+                self._cancel_goal_after_early_qr(
+                    waypoint_name,
+                    goal_handle,
+                    result_future,
+                )
+                return self.waypoints[waypoint_name]
+
             elapsed = time.monotonic() - start_time
             if elapsed > self.nav_timeout_sec:
                 self.get_logger().error(
@@ -448,32 +506,145 @@ class NavCruise(Node):
             )
 
         self.get_logger().info(f'已到达目标: {waypoint_name}')
-        self.execute_post_arrival_forward(waypoint_name)
+        self.execute_post_arrival_motion(waypoint_name)
         return self.waypoints[waypoint_name]
 
-    def execute_post_arrival_forward(self, waypoint_name):
-        """Execute optional open-loop forward compensation after a waypoint."""
+    def _cancel_goal_after_early_qr(
+            self, waypoint_name, goal_handle, result_future):
+        """Cancel the QR navigation goal after a valid early detection."""
+
+        direction = self._signal_to_direction(self.latest_qr_signal)
+        self._publish_state('QR_DETECTED_EARLY')
+        self.get_logger().info(
+            f'前往 {waypoint_name} 途中已识别二维码 '
+            f'{self.latest_qr_signal} ({direction})，取消当前目标并继续下一点'
+        )
+
+        cancel_future = goal_handle.cancel_goal_async()
+        rclpy.spin_until_future_complete(
+            self,
+            cancel_future,
+            timeout_sec=5.0,
+        )
+        if not cancel_future.done():
+            raise RuntimeError(
+                f'提前识别二维码后取消目标超时: {waypoint_name}'
+            )
+
+        rclpy.spin_until_future_complete(
+            self,
+            result_future,
+            timeout_sec=5.0,
+        )
+        if not result_future.done():
+            raise RuntimeError(
+                f'提前识别二维码后等待停车超时: {waypoint_name}'
+            )
+
+        status = result_future.result().status
+        if status not in (
+                GoalStatus.STATUS_CANCELED,
+                GoalStatus.STATUS_SUCCEEDED):
+            raise RuntimeError(
+                f'提前识别二维码后目标未安全取消: '
+                f'{waypoint_name}, status={status}'
+            )
+
+        self.get_logger().info(
+            f'已停止前往 {waypoint_name}，开始执行下一航点'
+        )
+
+    def execute_post_arrival_motion(self, waypoint_name):
+        """Execute optional open-loop forward and reverse waypoint motions."""
 
         waypoint = self.waypoints[waypoint_name]
-        distance_m = float(
+        forward_distance_m = float(
             waypoint.get('post_arrival_forward_distance_m', 0.0)
         )
-        speed_mps = float(
+        forward_speed_mps = float(
             waypoint.get('post_arrival_forward_speed_mps', 0.0)
         )
+        reverse_distance_m = float(
+            waypoint.get('post_arrival_reverse_distance_m', 0.0)
+        )
+        reverse_speed_mps = float(
+            waypoint.get('post_arrival_reverse_speed_mps', 0.0)
+        )
+        direction_change_pause_sec = max(
+            0.0,
+            float(waypoint.get(
+                'post_arrival_direction_change_pause_sec',
+                1.0,
+            )),
+        )
 
-        if distance_m <= 0.0 or speed_mps <= 0.0:
+        has_forward_motion = (
+            forward_distance_m > 0.0 and abs(forward_speed_mps) > 0.0
+        )
+        has_reverse_motion = (
+            reverse_distance_m > 0.0 and abs(reverse_speed_mps) > 0.0
+        )
+        if has_forward_motion or has_reverse_motion:
+            settle_sec = max(
+                0.0,
+                float(waypoint.get('post_arrival_settle_sec', 1.2)),
+            )
+            self._wait_for_motion_channel_settle(waypoint_name, settle_sec)
+
+        self._execute_open_loop_linear_motion(
+            waypoint_name,
+            '前进',
+            forward_distance_m,
+            forward_speed_mps,
+        )
+        if has_forward_motion and has_reverse_motion:
+            self._hold_motion_stop(
+                waypoint_name,
+                direction_change_pause_sec,
+            )
+        self._execute_open_loop_linear_motion(
+            waypoint_name,
+            '后退',
+            reverse_distance_m,
+            -abs(reverse_speed_mps),
+        )
+
+    def _wait_for_motion_channel_settle(self, waypoint_name, settle_sec):
+        """Wait for Nav2 velocity smoother output to become idle."""
+
+        if settle_sec <= 0.0:
             return
 
-        duration_sec = distance_m / speed_mps
+        self.get_logger().info(
+            f'航点 {waypoint_name} 到达后等待速度链静置 '
+            f'{settle_sec:.2f}s'
+        )
+        end_time = time.monotonic() + settle_sec
+        while time.monotonic() < end_time and rclpy.ok():
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+    def _execute_open_loop_linear_motion(
+            self, waypoint_name, motion_name, distance_m, speed_mps):
+        """Publish one timed, straight open-loop linear motion."""
+
+        distance_m = abs(float(distance_m))
+        speed_mps = float(speed_mps)
+
+        if distance_m <= 0.0 or abs(speed_mps) <= 0.0:
+            return
+
+        duration_sec = distance_m / abs(speed_mps)
         twist = Twist()
         twist.linear.x = speed_mps
         twist.angular.z = 0.0
 
         self.get_logger().info(
-            f'航点 {waypoint_name} 到达后执行前进补偿: '
+            f'航点 {waypoint_name} 到达后执行{motion_name}: '
             f'distance={distance_m:.3f}m, speed={speed_mps:.3f}m/s, '
             f'duration={duration_sec:.2f}s'
+        )
+        self._publish_state(
+            f'POST_MOTION_{"FORWARD" if speed_mps > 0.0 else "REVERSE"}'
         )
 
         start_time = time.monotonic()
@@ -484,8 +655,47 @@ class NavCruise(Node):
             while time.monotonic() < end_time and rclpy.ok():
                 rclpy.spin_once(self, timeout_sec=0.02)
 
+        self._publish_motion_stop()
+
+    def _hold_motion_stop(self, waypoint_name, pause_sec):
+        """Hold zero velocity before changing travel direction."""
+
+        if pause_sec <= 0.0:
+            return
+
+        self._publish_state('POST_MOTION_DIRECTION_CHANGE_PAUSE')
+        self.get_logger().info(
+            f'航点 {waypoint_name} 前进结束，保持零速 '
+            f'{pause_sec:.2f}s 后再后退'
+        )
+        stop_msg = Twist()
+        end_time = time.monotonic() + pause_sec
+        while time.monotonic() < end_time and rclpy.ok():
+            self.cmd_vel_pub.publish(stop_msg)
+            interval_end = time.monotonic() + 0.1
+            while time.monotonic() < interval_end and rclpy.ok():
+                rclpy.spin_once(self, timeout_sec=0.02)
+
+    def _publish_motion_stop(self):
+        """Publish a short zero-velocity burst between open-loop motions."""
+
+        stop_msg = Twist()
+        for _ in range(5):
+            self.cmd_vel_pub.publish(stop_msg)
+            end_time = time.monotonic() + 0.05
+            while time.monotonic() < end_time and rclpy.ok():
+                rclpy.spin_once(self, timeout_sec=0.01)
+
     def wait_for_qr_signal(self):
-        self.latest_qr_signal = None
+        if self._has_valid_qr_signal():
+            direction = self._signal_to_direction(self.latest_qr_signal)
+            self.get_logger().info(
+                f'复用途中已收到的二维码方向信号: '
+                f'{self.latest_qr_signal} ({direction})'
+            )
+            self._publish_state(f'QR_{direction}')
+            return self.latest_qr_signal
+
         self._publish_state('WAIT_QR_SIGNAL')
         self.get_logger().info(
             f'等待二维码方向信号 {self.clockwise_signal}/'
@@ -495,9 +705,7 @@ class NavCruise(Node):
 
         start_time = time.monotonic()
         while rclpy.ok():
-            if self.latest_qr_signal in (
-                    self.clockwise_signal,
-                    self.anticlockwise_signal):
+            if self._has_valid_qr_signal():
                 direction = self._signal_to_direction(self.latest_qr_signal)
                 self._publish_state(f'QR_{direction}')
                 return self.latest_qr_signal
@@ -535,6 +743,7 @@ class NavCruise(Node):
                 self.publish_initial_pose()
 
             self._wait_for_nav_server()
+            self.wait_start_delay()
 
             route = self._route_waypoint_names()
             self.get_logger().info(
@@ -542,7 +751,14 @@ class NavCruise(Node):
             )
 
             current_pose = self.initial_pose
-            current_pose = self.navigate_to(route[0], current_pose)
+            current_pose = self.navigate_to(
+                route[0],
+                current_pose,
+                stop_on_qr_signal=(
+                    self.skip_qr_goal_on_signal
+                    and route[0] == 'qr_stop'
+                ),
+            )
             self.wait_for_qr_signal()
 
             for waypoint_name in route[1:]:

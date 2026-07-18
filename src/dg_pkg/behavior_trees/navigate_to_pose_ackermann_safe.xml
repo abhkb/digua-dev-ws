@@ -29,7 +29,7 @@
       <PipelineSequence name="NavigateWithReplanning">
         <!--
           0.333Hz 重规划: 约每 3 秒调用一次 ComputePathToPose
-          降低行驶中频繁换路径导致的打方向/倒车换向抖动
+          缩短新发现远端障碍后的路径更新等待，同时避免恢复到 1Hz 高频跳变
           规划失败时清除全局代价地图后重试 1 次
         -->
         <RateController hz="0.333">

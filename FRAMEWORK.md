@@ -221,8 +221,9 @@ AMCL 不激活和 `map` 帧缺失。
  - 控制器类型: RegulatedPurePursuitController（非完整约束 / 阿克曼适配）
  - 调试巡航速度: `desired_linear_vel=0.10 m/s`，速度平滑上限 `0.12 m/s`
  - 稳定后比赛巡航候选: `0.18~0.20 m/s`
- - 预瞄距离: `lookahead_dist=0.35m`，范围 `0.20~0.50m`
+ - 预瞄距离: `lookahead_dist=0.35m`，动态范围 `0.35~0.70m`，`lookahead_time=0.4`
  - 碰撞检测: 开启
+ - 当前 RPP 稳定跟踪档：`regulated_linear_scaling_min_radius=0.4`、`regulated_linear_scaling_min_speed=0.08`、`max_angular_accel=1.5`
  - R11 起主路径允许低速规划倒车：`allow_reversing: true`
  - `use_rotate_to_heading: false`，禁止零线速度原地旋转
  - 倒车策略不是“绝对禁止”，而是“禁止 Nav2 无安全判断地盲倒车”；
@@ -245,8 +246,9 @@ AMCL 不激活和 `map` 帧缺失。
  - 全局 costmap: 30m × 30m 静态 + 动态障碍
  - footprint: [[-0.15,-0.105],[-0.15,0.105],[0.15,0.105],[0.15,-0.105]]
    （实车 0.28m × 0.185m 外廓加约 1cm 余量）
- - R13 膨胀半径当前值: 局部 0.22m / 全局 0.30m，
-   `cost_scaling_factor: 2.5`（为路障留边，P 点贴墙起终点约束下可微调）
+ - R28 后膨胀半径当前值: 局部 0.25m / 全局 0.30m，
+   `cost_scaling_factor: 2.5`（该值是代价衰减系数，不是扩张距离；当前按用户要求提高全局规划层留边，若路径明显绕远或无法穿过足够宽空隙，优先把全局回退到 0.24 或 0.20）
+ - R29 障碍观测范围：全局 `obstacle_max_range=4.5m`、`raytrace_max_range=5.0m`；局部保持 `2.5m/3.0m`，只扩大 Smac 可用的远场动态障碍信息，不扩大局部滚动窗口。
 
 **阿克曼安全恢复**:
 - 使用 `dg_pkg/behavior_trees/navigate_to_pose_ackermann_safe.xml`
@@ -312,8 +314,17 @@ ros2 launch dg_pkg dg_nav2.launch.py \
  **优先级**: P0（自动导航核心）
  
  - 封装 Nav2 导航接口（action: navigate_to_pose）
- - 航点：P点->QR点（Task1），QR点->通道入口（Task2入口），通道出口->P点（Task3）
- - 航点坐标实测后填入 competition_params.yaml
+ - 航点和执行顺序由 `competition_params.yaml` 的 `waypoints` 与
+   `routes.route_minimal` 配置；增加普通 Nav2 中间点不改代码
+ - waypoint 可选到点动作接口：
+   `post_arrival_settle_sec`、`post_arrival_forward_distance_m`、
+   `post_arrival_forward_speed_mps`、`post_arrival_reverse_distance_m`、
+   `post_arrival_reverse_speed_mps`
+ - 当前任务 1+3 路线：P 点 -> QR 点 -> QR 后返航过渡点 -> 进通道前；
+   随后开环直行 0.55m、停车、开环后退 0.55m，再由 Nav2 返回 P 点
+ - 前往 `qr_stop` 途中若收到合法二维码方向信号，可取消 QR goal 并直接继续
+   下一航点；取消后必须等待 Nav2 action 确认 CANCELED/SUCCEEDED
+ - 航点坐标实测后填入 `competition_params.yaml`
  - 导航参数（教程推荐）：
    - 最大线速度: 0.3 m/s，最大角速度: 0.5 rad/s
    - 阿克曼转弯半径: 0.25m，轴距: 0.25m
@@ -382,11 +393,15 @@ ros2 launch dg_pkg dg_nav2.launch.py \
  **开发者**: Codex CLI 评审 -> Claude Code 修改
  **优先级**: P2
  
- 评审问题:
+评审问题:
  | 问题 | 严重程度 | 说明 |
  |------|----------|------|
  | 话题名不统一 | 中 | 订阅 /image 但旧文档写 /image_raw，统一为 /image；比赛二维码规则为 1~9999 奇数=CW、偶数=CCW |
  | same_count 归零过早 | 低 | publish 后立即归零可能重复触发 |
+
+当前比赛限制：`qrcode_detector.scan_start_delay_sec=15.0`，节点启动后的前
+15 秒忽略图像；`dg_competition.launch.py` 可用
+`qr_scan_start_delay_sec` 覆盖。
  | 缺少状态检测抑制 | 中 | 检测到后应抑制直到状态机进入 TASK1_SCAN_QR |
  
  ### 3.7 [M7] 一键启动 Launch 文件
@@ -423,7 +438,8 @@ ros2 launch dg_pkg dg_nav2.launch.py \
      arrival_distance: 0.3          # 到达判定距离 (m)
      goal_accuracy_xy: 0.05         # 目标精度 xy (m)
      goal_accuracy_yaw: 0.1         # 目标精度 yaw (rad)
-     inflation_radius: 0.15         # 障碍物膨胀半径 (m)
+     local_inflation_radius: 0.25   # 局部代价地图膨胀半径 (m)
+     global_inflation_radius: 0.30  # 全局代价地图膨胀半径 (m)
      nav_timeout: 120.0             # 导航超时 (s)
    qr:
      debounce_frames: 5             # QR去抖帧数
