@@ -54,27 +54,19 @@ dg_competition:
         z: -0.9656394267554317
         w: 0.25988554691525506
 
-    return_mid_after_qr:
-      description: "QR 点倒车后返航过渡点"
-      x: 3.5346083850148604
-      y: 0.9745705119085102
-      z: 0.0
-      yaw: 2.216837
-      yaw_deg: 127.015
-      orientation:
-        x: 0.0
-        y: 0.0
-        z: 0.8949942422490728
-        w: 0.4460776909250316
-
     task13_channel_near:
       description: "任务 1+3：到通道附近，准备进入指定通道"
       post_arrival_settle_sec: 1.2
-      post_arrival_forward_distance_m: 0.55
-      post_arrival_forward_speed_mps: 0.20
-      post_arrival_reverse_distance_m: 0.55
-      post_arrival_reverse_speed_mps: 0.20
-      # 前进结束后保持零速，给底盘留出正转切换到反转的时间。
+      post_arrival_pre_turn_radius_m: 0.35
+      post_arrival_pre_turn_angle_deg: 30.0
+      post_arrival_pre_turn_speed_mps: 0.20
+      post_arrival_pre_turn_direction: "right"
+      post_arrival_return_to_pre_turn_pose: true
+      post_arrival_forward_distance_m: 1.00
+      post_arrival_forward_speed_mps: 0.25
+      post_arrival_reverse_distance_m: 1.00
+      post_arrival_reverse_speed_mps: 0.25
+      # 直行结束后保持零速，给底盘留出正转切换到反转的时间。
       post_arrival_direction_change_pause_sec: 1.0
       x: 2.2959826696340824
       y: 1.6753652565703052
@@ -92,7 +84,6 @@ dg_competition:
     # 以后增加中间点，只需要在 waypoints 中新增点，并把名字插入这里。
     route_minimal:
       - "qr_stop"
-      - "return_mid_after_qr"
       - "task13_channel_near"
       - "p_return"
 
@@ -121,5 +112,14 @@ dg_competition:
   qr:
     clockwise_signal: 3
     anticlockwise_signal: 4
-    # 前往 qr_stop 途中一旦识别到有效二维码，取消该目标并继续下一点。
-    skip_qr_goal_on_signal: true
+    # 必须先到达固定 QR 点再执行扫码后的右后弧倒车。
+    skip_qr_goal_on_signal: false
+    post_detection_motion:
+      enabled: true
+      type: "arc"
+      travel_direction: "reverse"
+      turn_direction: "right"
+      radius_m: 0.35
+      angle_deg: 100.0
+      speed_mps: 0.20
+      settle_sec: 1.2

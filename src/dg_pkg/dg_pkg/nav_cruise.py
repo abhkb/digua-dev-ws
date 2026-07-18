@@ -7,8 +7,8 @@ Flow:
   1. Publish the fixed initial pose at P.
   2. Navigate to the QR waypoint with Nav2 NavigateToPose.
   3. Wait for `/sign_foxglove` to become 3 or 4.
-  4. Follow the configured waypoint route, including optional post-arrival
-     straight motions.
+  4. Execute the configured QR post-detection maneuver and waypoint route,
+     including optional post-arrival straight or arc motions.
   5. Return to P, publish zero `/cmd_vel`, and finish.
 
 This node intentionally implements only the first closed loop
@@ -170,7 +170,7 @@ class NavCruise(Node):
         routes:
           route_minimal:
             - "qr_stop"
-            - "return_mid_after_qr"
+            - "task13_channel_near"
             - "p_return"
         """
 
@@ -555,7 +555,7 @@ class NavCruise(Node):
         )
 
     def execute_post_arrival_motion(self, waypoint_name):
-        """Execute optional open-loop forward and reverse waypoint motions."""
+        """Execute optional open-loop straight or arc waypoint motions."""
 
         waypoint = self.waypoints[waypoint_name]
         forward_distance_m = float(
@@ -570,6 +570,44 @@ class NavCruise(Node):
         reverse_speed_mps = float(
             waypoint.get('post_arrival_reverse_speed_mps', 0.0)
         )
+        pre_turn_radius_m = max(
+            0.0,
+            float(waypoint.get('post_arrival_pre_turn_radius_m', 0.0)),
+        )
+        pre_turn_angle_deg = max(
+            0.0,
+            float(waypoint.get('post_arrival_pre_turn_angle_deg', 0.0)),
+        )
+        pre_turn_speed_mps = abs(float(
+            waypoint.get('post_arrival_pre_turn_speed_mps', 0.0)
+        ))
+        pre_turn_direction = str(
+            waypoint.get('post_arrival_pre_turn_direction', 'right')
+        ).lower()
+        return_to_pre_turn_pose = bool(
+            waypoint.get('post_arrival_return_to_pre_turn_pose', False)
+        )
+        turn_radius_m = max(
+            0.0,
+            float(waypoint.get('post_arrival_turn_radius_m', 0.0)),
+        )
+        turn_direction = str(
+            waypoint.get('post_arrival_turn_direction', 'right')
+        ).lower()
+        forward_duration_sec = max(
+            0.0,
+            float(waypoint.get(
+                'post_arrival_forward_duration_sec',
+                0.0,
+            )),
+        )
+        reverse_duration_sec = max(
+            0.0,
+            float(waypoint.get(
+                'post_arrival_reverse_duration_sec',
+                0.0,
+            )),
+        )
         direction_change_pause_sec = max(
             0.0,
             float(waypoint.get(
@@ -578,35 +616,160 @@ class NavCruise(Node):
             )),
         )
 
-        has_forward_motion = (
+        has_pre_turn_arc = (
+            pre_turn_radius_m > 0.0
+            and pre_turn_angle_deg > 0.0
+            and pre_turn_speed_mps > 0.0
+        )
+        has_forward_arc = (
+            turn_radius_m > 0.0
+            and forward_duration_sec > 0.0
+            and abs(forward_speed_mps) > 0.0
+        )
+        has_reverse_arc = (
+            turn_radius_m > 0.0
+            and reverse_duration_sec > 0.0
+            and abs(reverse_speed_mps) > 0.0
+        )
+        has_forward_motion = has_forward_arc or (
             forward_distance_m > 0.0 and abs(forward_speed_mps) > 0.0
         )
-        has_reverse_motion = (
+        has_reverse_motion = has_reverse_arc or (
             reverse_distance_m > 0.0 and abs(reverse_speed_mps) > 0.0
         )
-        if has_forward_motion or has_reverse_motion:
+        if has_pre_turn_arc or has_forward_motion or has_reverse_motion:
             settle_sec = max(
                 0.0,
                 float(waypoint.get('post_arrival_settle_sec', 1.2)),
             )
             self._wait_for_motion_channel_settle(waypoint_name, settle_sec)
 
-        self._execute_open_loop_linear_motion(
-            waypoint_name,
-            '前进',
-            forward_distance_m,
-            forward_speed_mps,
-        )
+        if has_pre_turn_arc:
+            pre_turn_duration_sec = (
+                math.radians(pre_turn_angle_deg)
+                * pre_turn_radius_m
+                / pre_turn_speed_mps
+            )
+            self._execute_open_loop_arc_motion(
+                waypoint_name,
+                '右前转弯' if pre_turn_direction == 'right' else '左前转弯',
+                pre_turn_speed_mps,
+                pre_turn_radius_m,
+                pre_turn_duration_sec,
+                pre_turn_direction,
+                'POST_MOTION_PRE_TURN_ARC',
+            )
+
+        if has_forward_arc:
+            self._execute_open_loop_arc_motion(
+                waypoint_name,
+                '右前弧' if turn_direction == 'right' else '左前弧',
+                abs(forward_speed_mps),
+                turn_radius_m,
+                forward_duration_sec,
+                turn_direction,
+                'POST_MOTION_FORWARD_ARC',
+            )
+        else:
+            self._execute_open_loop_linear_motion(
+                waypoint_name,
+                '前进',
+                forward_distance_m,
+                forward_speed_mps,
+            )
         if has_forward_motion and has_reverse_motion:
             self._hold_motion_stop(
                 waypoint_name,
                 direction_change_pause_sec,
             )
-        self._execute_open_loop_linear_motion(
-            waypoint_name,
-            '后退',
-            reverse_distance_m,
-            -abs(reverse_speed_mps),
+        if has_reverse_arc:
+            self._execute_open_loop_arc_motion(
+                waypoint_name,
+                '右后弧' if turn_direction == 'right' else '左后弧',
+                -abs(reverse_speed_mps),
+                turn_radius_m,
+                reverse_duration_sec,
+                turn_direction,
+                'POST_MOTION_REVERSE_ARC',
+            )
+        else:
+            self._execute_open_loop_linear_motion(
+                waypoint_name,
+                '后退',
+                reverse_distance_m,
+                -abs(reverse_speed_mps),
+            )
+
+        if has_pre_turn_arc and return_to_pre_turn_pose:
+            pre_turn_duration_sec = (
+                math.radians(pre_turn_angle_deg)
+                * pre_turn_radius_m
+                / pre_turn_speed_mps
+            )
+            self._execute_open_loop_arc_motion(
+                waypoint_name,
+                '右后弧返回转向前' if pre_turn_direction == 'right'
+                else '左后弧返回转向前',
+                -pre_turn_speed_mps,
+                pre_turn_radius_m,
+                pre_turn_duration_sec,
+                pre_turn_direction,
+                'POST_MOTION_RETURN_TURN_ARC',
+            )
+
+    def execute_qr_post_detection_motion(self):
+        """Execute the configured motion after a valid QR signal."""
+
+        motion = self.qr_config.get('post_detection_motion', {})
+        if not isinstance(motion, dict) or not bool(
+                motion.get('enabled', False)):
+            return
+
+        motion_type = str(motion.get('type', 'arc')).lower()
+        if motion_type != 'arc':
+            raise RuntimeError(
+                f'不支持的 QR 后动作类型: {motion_type}'
+            )
+
+        radius_m = float(motion.get('radius_m', 0.0))
+        angle_deg = float(motion.get('angle_deg', 0.0))
+        speed_mps = abs(float(motion.get('speed_mps', 0.0)))
+        travel_direction = str(
+            motion.get('travel_direction', 'reverse')
+        ).lower()
+        turn_direction = str(
+            motion.get('turn_direction', 'right')
+        ).lower()
+
+        if radius_m <= 0.0 or angle_deg <= 0.0 or speed_mps <= 0.0:
+            raise RuntimeError(
+                'QR 后弧线动作的 radius_m、angle_deg、speed_mps '
+                '必须大于 0'
+            )
+        if travel_direction not in ('forward', 'reverse'):
+            raise RuntimeError(
+                f'不支持的 QR 后行驶方向: {travel_direction}'
+            )
+
+        settle_sec = max(0.0, float(motion.get('settle_sec', 1.2)))
+        self._wait_for_motion_channel_settle('qr_stop', settle_sec)
+
+        signed_speed_mps = (
+            speed_mps if travel_direction == 'forward' else -speed_mps
+        )
+        duration_sec = math.radians(angle_deg) * radius_m / speed_mps
+        motion_name = (
+            ('右' if turn_direction == 'right' else '左')
+            + ('前弧' if travel_direction == 'forward' else '后弧')
+        )
+        self._execute_open_loop_arc_motion(
+            'qr_stop',
+            motion_name,
+            signed_speed_mps,
+            radius_m,
+            duration_sec,
+            turn_direction,
+            'POST_QR_REVERSE_ARC',
         )
 
     def _wait_for_motion_channel_settle(self, waypoint_name, settle_sec):
@@ -646,6 +809,51 @@ class NavCruise(Node):
         self._publish_state(
             f'POST_MOTION_{"FORWARD" if speed_mps > 0.0 else "REVERSE"}'
         )
+
+        start_time = time.monotonic()
+        publish_interval_sec = 0.1
+        while rclpy.ok() and (time.monotonic() - start_time) < duration_sec:
+            self.cmd_vel_pub.publish(twist)
+            end_time = time.monotonic() + publish_interval_sec
+            while time.monotonic() < end_time and rclpy.ok():
+                rclpy.spin_once(self, timeout_sec=0.02)
+
+        self._publish_motion_stop()
+
+    def _execute_open_loop_arc_motion(
+            self, waypoint_name, motion_name, speed_mps, radius_m,
+            duration_sec, turn_direction, state_name):
+        """Publish one timed constant-radius open-loop arc motion."""
+
+        speed_mps = float(speed_mps)
+        radius_m = abs(float(radius_m))
+        duration_sec = max(0.0, float(duration_sec))
+        turn_direction = str(turn_direction).lower()
+
+        if abs(speed_mps) <= 0.0 or radius_m <= 0.0 or duration_sec <= 0.0:
+            return
+        if turn_direction not in ('left', 'right'):
+            raise RuntimeError(
+                f'不支持的转弯方向: {turn_direction}'
+            )
+
+        curvature_sign = -1.0 if turn_direction == 'right' else 1.0
+        angular_z = speed_mps * curvature_sign / radius_m
+        angle_deg = math.degrees(
+            abs(angular_z) * duration_sec
+        )
+
+        twist = Twist()
+        twist.linear.x = speed_mps
+        twist.angular.z = angular_z
+
+        self.get_logger().info(
+            f'航点 {waypoint_name} 执行{motion_name}: '
+            f'speed={speed_mps:.3f}m/s, radius={radius_m:.3f}m, '
+            f'angular_z={angular_z:.3f}rad/s, '
+            f'angle={angle_deg:.1f}deg, duration={duration_sec:.2f}s'
+        )
+        self._publish_state(state_name)
 
         start_time = time.monotonic()
         publish_interval_sec = 0.1
@@ -760,6 +968,7 @@ class NavCruise(Node):
                 ),
             )
             self.wait_for_qr_signal()
+            self.execute_qr_post_detection_motion()
 
             for waypoint_name in route[1:]:
                 current_pose = self.navigate_to(waypoint_name, current_pose)

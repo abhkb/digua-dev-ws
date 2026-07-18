@@ -316,14 +316,24 @@ ros2 launch dg_pkg dg_nav2.launch.py \
  - 封装 Nav2 导航接口（action: navigate_to_pose）
  - 航点和执行顺序由 `competition_params.yaml` 的 `waypoints` 与
    `routes.route_minimal` 配置；增加普通 Nav2 中间点不改代码
- - waypoint 可选到点动作接口：
+ - waypoint 可选到点动作接口同时兼容直线与定半径弧线：
    `post_arrival_settle_sec`、`post_arrival_forward_distance_m`、
    `post_arrival_forward_speed_mps`、`post_arrival_reverse_distance_m`、
-   `post_arrival_reverse_speed_mps`
- - 当前任务 1+3 路线：P 点 -> QR 点 -> QR 后返航过渡点 -> 进通道前；
-   随后开环直行 0.55m、停车、开环后退 0.55m，再由 Nav2 返回 P 点
- - 前往 `qr_stop` 途中若收到合法二维码方向信号，可取消 QR goal 并直接继续
-   下一航点；取消后必须等待 Nav2 action 确认 CANCELED/SUCCEEDED
+   `post_arrival_reverse_speed_mps`、`post_arrival_turn_radius_m`、
+   `post_arrival_turn_direction`、`post_arrival_forward_duration_sec`、
+   `post_arrival_reverse_duration_sec`；还可用
+   `post_arrival_pre_turn_radius_m`、`post_arrival_pre_turn_angle_deg`、
+   `post_arrival_pre_turn_speed_mps`、`post_arrival_pre_turn_direction`
+   在直线动作前增加一次定角度弧线转向；设置
+   `post_arrival_return_to_pre_turn_pose=true` 后，会在直线后退完成后沿
+   相同弧线倒车，恢复转向前的位置与朝向。
+ - 当前任务 1+3 路线：P 点 -> QR 点 -> 进通道前 -> P 点。
+ - `qr.skip_qr_goal_on_signal=false`：必须先到固定 QR 点并识别有效二维码，再按
+   `qr.post_detection_motion` 执行半径 0.35m、速度 0.20m/s 的右后弧倒车
+   100°，替代原 `return_mid_after_qr` Nav2 过渡点。
+ - 到达通道前点后，先以半径 0.35m、速度 0.20m/s 右转 30°（约0.92s），
+   再直行前进 1.00m@0.25m/s、保持零速 1.0s、直行后退
+   1.00m@0.25m/s，最后沿同一右转弧线倒车30°，理论上回到转向前。
  - 航点坐标实测后填入 `competition_params.yaml`
  - 导航参数（教程推荐）：
    - 最大线速度: 0.3 m/s，最大角速度: 0.5 rad/s
