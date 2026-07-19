@@ -28,6 +28,7 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from rclpy.qos import qos_profile_sensor_data
 
 from geometry_msgs.msg import PoseStamped
 from geometry_msgs.msg import PoseWithCovarianceStamped
@@ -35,8 +36,21 @@ from geometry_msgs.msg import Quaternion
 from geometry_msgs.msg import Twist
 from nav2_msgs.action import NavigateToPose
 from rcl_interfaces.srv import SetParameters
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Int32
 from std_msgs.msg import String
+
+
+class NavigationAttemptError(RuntimeError):
+    """Report one failed Nav2 attempt and whether open-loop recovery is safe."""
+
+    def __init__(self, message, recovery_allowed=True):
+        super().__init__(message)
+        self.recovery_allowed = bool(recovery_allowed)
+
+
+class EmergencyReturnCompleted(RuntimeError):
+    """Unwind the normal mission after a failure-triggered return to P."""
 
 
 class NavCruise(Node):
@@ -58,6 +72,7 @@ class NavCruise(Node):
         self.declare_parameter('qr_signal_topic', '/sign_foxglove')
         self.declare_parameter('state_topic', '/competition/state')
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
+        self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('start_delay_sec', -1.0)
         self.declare_parameter('qr_wait_timeout_sec', 60.0)
         self.declare_parameter('action_server_timeout_sec', 20.0)
@@ -74,6 +89,7 @@ class NavCruise(Node):
         self.qr_signal_topic = self.get_parameter('qr_signal_topic').value
         self.state_topic = self.get_parameter('state_topic').value
         self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
+        self.scan_topic = self.get_parameter('scan_topic').value
         self.start_delay_sec = float(
             self.get_parameter('start_delay_sec').value
         )
@@ -122,6 +138,7 @@ class NavCruise(Node):
         self.controller_server_node = str(
             self.navigation.get('controller_server_node', '/controller_server')
         )
+        self.failure_recovery = self._load_failure_recovery_config()
         self.clockwise_signal = int(self.qr_config.get('clockwise_signal', 3))
         self.anticlockwise_signal = int(
             self.qr_config.get('anticlockwise_signal', 4)
@@ -131,6 +148,8 @@ class NavCruise(Node):
         )
 
         self.latest_qr_signal = None
+        self.latest_scan = None
+        self.latest_scan_monotonic = None
 
         self.initialpose_pub = self.create_publisher(
             PoseWithCovarianceStamped,
@@ -144,6 +163,12 @@ class NavCruise(Node):
             self.qr_signal_topic,
             self._qr_signal_callback,
             10,
+        )
+        self.scan_sub = self.create_subscription(
+            LaserScan,
+            self.scan_topic,
+            self._scan_callback,
+            qos_profile_sensor_data,
         )
         self.nav_client = ActionClient(
             self,
@@ -159,7 +184,8 @@ class NavCruise(Node):
             '最小自动巡航节点已启动: '
             f'params_file={self.params_file}, '
             f'nav_action={self.nav_action_name}, '
-            f'qr_signal={self.qr_signal_topic}'
+            f'qr_signal={self.qr_signal_topic}, '
+            f'failure_recovery={self.failure_recovery["enabled"]}'
         )
 
     def _route_waypoint_names(self):
@@ -242,7 +268,7 @@ class NavCruise(Node):
         return True
 
     def _apply_waypoint_goal_tolerance(self, waypoint_name):
-        """Apply normal or yaw-ignored goal tolerance for a waypoint."""
+        """Apply waypoint-specific, default, or yaw-ignored tolerance."""
 
         waypoint = self.waypoints[waypoint_name]
         ignore_yaw = bool(waypoint.get('ignore_yaw', False))
@@ -256,9 +282,125 @@ class NavCruise(Node):
                 self.ignore_yaw_goal_tolerance
             )
         else:
-            self._set_controller_yaw_tolerance(
-                self.default_yaw_goal_tolerance
+            tolerance = self.default_yaw_goal_tolerance
+            if 'yaw_goal_tolerance' in waypoint:
+                try:
+                    configured_tolerance = float(
+                        waypoint['yaw_goal_tolerance']
+                    )
+                    if (
+                        math.isfinite(configured_tolerance)
+                        and configured_tolerance > 0.0
+                    ):
+                        tolerance = configured_tolerance
+                        self.get_logger().info(
+                            f'航点 {waypoint_name} 使用专用 '
+                            f'yaw_goal_tolerance={tolerance:.3f}'
+                        )
+                    else:
+                        raise ValueError('必须是大于0的有限数')
+                except (TypeError, ValueError) as exc:
+                    self.get_logger().warn(
+                        f'航点 {waypoint_name} 的 yaw_goal_tolerance '
+                        f'无效（{exc}），回退默认值 '
+                        f'{self.default_yaw_goal_tolerance:.3f}'
+                    )
+            self._set_controller_yaw_tolerance(tolerance)
+
+    def _load_failure_recovery_config(self):
+        """Load and validate the bounded failure-recovery configuration."""
+
+        raw = self.navigation.get('failure_recovery', {})
+        if not isinstance(raw, dict):
+            raise ValueError('navigation.failure_recovery 必须是字典')
+
+        config = {
+            'enabled': bool(raw.get('enabled', True)),
+            'retry_original_goal_count': int(
+                raw.get('retry_original_goal_count', 1)
+            ),
+            'fallback_to_p_return': bool(
+                raw.get('fallback_to_p_return', True)
+            ),
+            'p_return_waypoint': str(
+                raw.get('p_return_waypoint', 'p_return')
+            ),
+            'p_return_recovery_count': int(
+                raw.get('p_return_recovery_count', 2)
+            ),
+            'scan_max_age_sec': float(raw.get('scan_max_age_sec', 0.5)),
+            'scan_wait_timeout_sec': float(
+                raw.get('scan_wait_timeout_sec', 1.0)
+            ),
+            'rear_clearance_m': float(raw.get('rear_clearance_m', 0.45)),
+            'rear_stop_clearance_m': float(
+                raw.get('rear_stop_clearance_m', 0.30)
+            ),
+            'rear_sector_half_angle_deg': float(
+                raw.get('rear_sector_half_angle_deg', 45.0)
+            ),
+            'min_valid_scan_points': int(
+                raw.get('min_valid_scan_points', 10)
+            ),
+            'reverse_arc_speed_mps': float(
+                raw.get('reverse_arc_speed_mps', 0.08)
+            ),
+            'reverse_arc_radius_m': float(
+                raw.get('reverse_arc_radius_m', 0.35)
+            ),
+            'reverse_arc_angle_deg': float(
+                raw.get('reverse_arc_angle_deg', 30.0)
+            ),
+            'settle_sec': float(raw.get('settle_sec', 0.5)),
+        }
+
+        turn_directions = raw.get('turn_directions', ['right', 'left'])
+        if not isinstance(turn_directions, list) or not turn_directions:
+            raise ValueError(
+                'navigation.failure_recovery.turn_directions 必须是非空列表'
             )
+        config['turn_directions'] = [
+            str(direction).lower() for direction in turn_directions
+        ]
+        if any(
+                direction not in ('left', 'right')
+                for direction in config['turn_directions']):
+            raise ValueError('failure_recovery 转弯方向只支持 left/right')
+
+        if config['p_return_waypoint'] not in self.waypoints:
+            raise ValueError(
+                'failure_recovery.p_return_waypoint 未在 waypoints 中定义: '
+                f'{config["p_return_waypoint"]}'
+            )
+        if not 0 <= config['retry_original_goal_count'] <= 3:
+            raise ValueError('retry_original_goal_count 必须在 0~3 之间')
+        if not 0 <= config['p_return_recovery_count'] <= 3:
+            raise ValueError('p_return_recovery_count 必须在 0~3 之间')
+        if not 0.0 < config['scan_max_age_sec'] <= 2.0:
+            raise ValueError('scan_max_age_sec 必须在 0~2 秒之间')
+        if not 0.0 < config['scan_wait_timeout_sec'] <= 5.0:
+            raise ValueError('scan_wait_timeout_sec 必须在 0~5 秒之间')
+        if config['rear_clearance_m'] < 0.35:
+            raise ValueError('rear_clearance_m 不得小于 0.35m')
+        if not 0.20 <= config['rear_stop_clearance_m'] < config[
+                'rear_clearance_m']:
+            raise ValueError(
+                'rear_stop_clearance_m 必须在0.20m与rear_clearance_m之间'
+            )
+        if not 20.0 <= config['rear_sector_half_angle_deg'] <= 90.0:
+            raise ValueError('rear_sector_half_angle_deg 必须在 20~90° 之间')
+        if config['min_valid_scan_points'] < 3:
+            raise ValueError('min_valid_scan_points 不得小于3')
+        if not 0.0 < config['reverse_arc_speed_mps'] <= 0.12:
+            raise ValueError('受控倒车速度必须在 0~0.12m/s 之间')
+        if config['reverse_arc_radius_m'] < 0.35:
+            raise ValueError('受控倒车半径不得小于 0.35m')
+        if not 5.0 <= config['reverse_arc_angle_deg'] <= 45.0:
+            raise ValueError('受控倒车角度必须在 5~45° 之间')
+        if not 0.0 <= config['settle_sec'] <= 3.0:
+            raise ValueError('failure_recovery.settle_sec 必须在 0~3 秒之间')
+
+        return config
 
     def _load_config(self, path):
         if not path.is_file():
@@ -287,6 +429,12 @@ class NavCruise(Node):
             self.get_logger().warn(
                 f'收到非预期二维码信号: {msg.data}，继续等待'
             )
+
+    def _scan_callback(self, msg):
+        """Cache the latest scan for guarded reverse recovery."""
+
+        self.latest_scan = msg
+        self.latest_scan_monotonic = time.monotonic()
 
     def _publish_state(self, state):
         msg = String()
@@ -439,8 +587,116 @@ class NavCruise(Node):
 
     def navigate_to(
             self, waypoint_name, previous_pose, stop_on_qr_signal=False):
+        """Navigate with bounded recovery and emergency fallback to P."""
+
+        return_waypoint = self.failure_recovery['p_return_waypoint']
+        if waypoint_name == return_waypoint:
+            recovery_count = self.failure_recovery[
+                'p_return_recovery_count'
+            ]
+        else:
+            recovery_count = self.failure_recovery[
+                'retry_original_goal_count'
+            ]
+
+        try:
+            return self._navigate_with_recovery(
+                waypoint_name,
+                previous_pose,
+                stop_on_qr_signal,
+                recovery_count,
+            )
+        except NavigationAttemptError as original_error:
+            can_fallback = (
+                self.failure_recovery['enabled']
+                and self.failure_recovery['fallback_to_p_return']
+                and waypoint_name != return_waypoint
+                and original_error.recovery_allowed
+            )
+            if not can_fallback:
+                raise
+
+            self.get_logger().error(
+                f'航点 {waypoint_name} 恢复后仍失败，'
+                f'中止后续任务并紧急返回 {return_waypoint}: '
+                f'{original_error}'
+            )
+            self._publish_state('EMERGENCY_RETURN_TO_P')
+            self._publish_motion_stop()
+
+            try:
+                self._navigate_with_recovery(
+                    return_waypoint,
+                    previous_pose,
+                    False,
+                    self.failure_recovery['p_return_recovery_count'],
+                )
+            except NavigationAttemptError as return_error:
+                raise RuntimeError(
+                    f'航点 {waypoint_name} 失败，紧急返回P也失败: '
+                    f'{return_error}'
+                ) from return_error
+
+            raise EmergencyReturnCompleted(
+                f'航点 {waypoint_name} 失败后已安全返回P'
+            ) from original_error
+
+    def _navigate_with_recovery(
+            self, waypoint_name, previous_pose, stop_on_qr_signal,
+            recovery_count):
+        """Retry one waypoint after guarded reverse-arc recovery."""
+
+        last_error = None
+        total_attempts = int(recovery_count) + 1
+
+        for attempt_index in range(total_attempts):
+            try:
+                return self._navigate_to_once(
+                    waypoint_name,
+                    previous_pose,
+                    stop_on_qr_signal,
+                )
+            except NavigationAttemptError as exc:
+                last_error = exc
+                self.get_logger().error(
+                    f'航点 {waypoint_name} 第{attempt_index + 1}/'
+                    f'{total_attempts}次导航失败: {exc}'
+                )
+
+                has_next_attempt = attempt_index < total_attempts - 1
+                if not has_next_attempt:
+                    break
+                if not self.failure_recovery['enabled']:
+                    self.get_logger().warn('失败恢复已关闭，不执行倒车脱困')
+                    break
+                if not exc.recovery_allowed:
+                    self.get_logger().error(
+                        'Nav2目标状态未能确认停止，禁止直接发布倒车指令'
+                    )
+                    break
+                if not self._execute_guarded_failure_recovery(
+                        waypoint_name, attempt_index):
+                    self.get_logger().error(
+                        '后方净空检查未通过，取消本次倒车脱困'
+                    )
+                    break
+
+                self.get_logger().warn(
+                    f'脱困完成，重新发送目标 {waypoint_name}'
+                )
+
+        if last_error is None:
+            raise NavigationAttemptError(
+                f'导航未产生结果: {waypoint_name}',
+                recovery_allowed=False,
+            )
+        raise last_error
+
+    def _navigate_to_once(
+            self, waypoint_name, previous_pose, stop_on_qr_signal=False):
+        """Send one Nav2 goal without performing failure recovery."""
+
         self._apply_waypoint_goal_tolerance(waypoint_name)
-        waypoint = self.waypoints[waypoint_name]
         pose = self._make_pose_stamped(waypoint_name, previous_pose)
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose = pose
@@ -454,11 +710,14 @@ class NavCruise(Node):
         )
 
         if not send_goal_future.done():
-            raise RuntimeError(f'发送目标超时: {waypoint_name}')
+            raise NavigationAttemptError(
+                f'发送目标超时: {waypoint_name}',
+                recovery_allowed=False,
+            )
 
         goal_handle = send_goal_future.result()
-        if not goal_handle.accepted:
-            raise RuntimeError(f'Nav2 拒绝目标: {waypoint_name}')
+        if goal_handle is None or not goal_handle.accepted:
+            raise NavigationAttemptError(f'Nav2 拒绝目标: {waypoint_name}')
 
         self.get_logger().info(f'Nav2 已接受目标: {waypoint_name}')
 
@@ -486,7 +745,33 @@ class NavCruise(Node):
                     cancel_future,
                     timeout_sec=5.0,
                 )
-                raise RuntimeError(f'导航超时: {waypoint_name}')
+                if not cancel_future.done():
+                    raise NavigationAttemptError(
+                        f'导航超时且取消目标无响应: {waypoint_name}',
+                        recovery_allowed=False,
+                    )
+
+                rclpy.spin_until_future_complete(
+                    self,
+                    result_future,
+                    timeout_sec=5.0,
+                )
+                if not result_future.done():
+                    raise NavigationAttemptError(
+                        f'导航超时且无法确认目标已停止: {waypoint_name}',
+                        recovery_allowed=False,
+                    )
+                timed_result = result_future.result()
+                if timed_result.status == GoalStatus.STATUS_SUCCEEDED:
+                    self.get_logger().warn(
+                        f'航点 {waypoint_name} 在取消确认期间报告成功，'
+                        '按已到达处理，不执行脱困'
+                    )
+                    self.execute_post_arrival_motion(waypoint_name)
+                    return self.waypoints[waypoint_name]
+                raise NavigationAttemptError(
+                    f'导航超时: {waypoint_name}'
+                )
 
             if elapsed - last_log_time >= 5.0:
                 self.get_logger().info(
@@ -497,17 +782,193 @@ class NavCruise(Node):
             rclpy.spin_once(self, timeout_sec=0.1)
 
         if not result_future.done():
-            raise RuntimeError(f'导航结果未知: {waypoint_name}')
+            raise NavigationAttemptError(
+                f'导航结果未知: {waypoint_name}',
+                recovery_allowed=False,
+            )
 
         result = result_future.result()
         if result.status != GoalStatus.STATUS_SUCCEEDED:
-            raise RuntimeError(
+            raise NavigationAttemptError(
                 f'导航失败: {waypoint_name}, status={result.status}'
             )
 
         self.get_logger().info(f'已到达目标: {waypoint_name}')
         self.execute_post_arrival_motion(waypoint_name)
         return self.waypoints[waypoint_name]
+
+    def _execute_guarded_failure_recovery(
+            self, waypoint_name, recovery_index):
+        """Reverse on a short arc only when fresh rear scan data is clear."""
+
+        self._publish_state('RECOVERY_CHECK_REAR_CLEARANCE')
+        self._publish_motion_stop()
+        self._hold_recovery_settle()
+
+        scan = self._wait_for_fresh_recovery_scan()
+        if scan is None:
+            self.get_logger().error(
+                f'航点 {waypoint_name} 脱困失败：未收到新鲜 {self.scan_topic}'
+            )
+            return False
+
+        configured_directions = self.failure_recovery['turn_directions']
+        offset = recovery_index % len(configured_directions)
+        direction_order = (
+            configured_directions[offset:] + configured_directions[:offset]
+        )
+
+        selected_direction = None
+        for direction in direction_order:
+            clearance_m, sample_count = self._rear_sector_clearance(
+                scan, direction
+            )
+            self.get_logger().info(
+                f'恢复方向 {direction}: rear_clearance='
+                f'{clearance_m:.3f}m, samples={sample_count}'
+            )
+            if sample_count < self.failure_recovery[
+                    'min_valid_scan_points']:
+                continue
+            if clearance_m >= self.failure_recovery['rear_clearance_m']:
+                selected_direction = direction
+                break
+
+        if selected_direction is None:
+            return False
+
+        speed_mps = self.failure_recovery['reverse_arc_speed_mps']
+        radius_m = self.failure_recovery['reverse_arc_radius_m']
+        angle_deg = self.failure_recovery['reverse_arc_angle_deg']
+        duration_sec = math.radians(angle_deg) * radius_m / speed_mps
+        signed_speed_mps = -speed_mps
+        curvature_sign = -1.0 if selected_direction == 'right' else 1.0
+        angular_z = signed_speed_mps * curvature_sign / radius_m
+
+        twist = Twist()
+        twist.linear.x = signed_speed_mps
+        twist.angular.z = angular_z
+
+        self.get_logger().warn(
+            f'航点 {waypoint_name} 开始受控脱困：'
+            f'{selected_direction}后弧 {angle_deg:.1f}°，'
+            f'linear.x={signed_speed_mps:.3f}m/s，'
+            f'angular.z={angular_z:.3f}rad/s，'
+            f'duration={duration_sec:.2f}s'
+        )
+        self._publish_state('RECOVERY_REVERSE_ARC')
+
+        start_time = time.monotonic()
+        publish_interval_sec = 0.1
+        while rclpy.ok() and (time.monotonic() - start_time) < duration_sec:
+            current_scan = self._get_fresh_recovery_scan()
+            if current_scan is None:
+                self.get_logger().error(
+                    '倒车脱困过程中 /scan 过期，立即停车'
+                )
+                self._publish_motion_stop()
+                return False
+
+            clearance_m, sample_count = self._rear_sector_clearance(
+                current_scan, selected_direction
+            )
+            if (
+                sample_count < self.failure_recovery[
+                    'min_valid_scan_points'
+                ]
+                or clearance_m < self.failure_recovery[
+                    'rear_stop_clearance_m'
+                ]
+            ):
+                self.get_logger().error(
+                    '倒车脱困过程中后方净空不足，立即停车：'
+                    f'clearance={clearance_m:.3f}m, '
+                    f'samples={sample_count}'
+                )
+                self._publish_motion_stop()
+                return False
+
+            self.cmd_vel_pub.publish(twist)
+            interval_end = time.monotonic() + publish_interval_sec
+            while time.monotonic() < interval_end and rclpy.ok():
+                rclpy.spin_once(self, timeout_sec=0.02)
+
+        self._publish_motion_stop()
+        self._hold_recovery_settle()
+        return True
+
+    def _hold_recovery_settle(self):
+        """Hold zero command briefly around a recovery maneuver."""
+
+        settle_sec = self.failure_recovery['settle_sec']
+        if settle_sec <= 0.0:
+            return
+
+        stop_msg = Twist()
+        end_time = time.monotonic() + settle_sec
+        while time.monotonic() < end_time and rclpy.ok():
+            self.cmd_vel_pub.publish(stop_msg)
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+    def _get_fresh_recovery_scan(self):
+        """Return the latest scan only while it is recent enough."""
+
+        if self.latest_scan is None or self.latest_scan_monotonic is None:
+            return None
+        age_sec = time.monotonic() - self.latest_scan_monotonic
+        if age_sec > self.failure_recovery['scan_max_age_sec']:
+            return None
+        return self.latest_scan
+
+    def _wait_for_fresh_recovery_scan(self):
+        """Wait briefly for a fresh scan before allowing reverse motion."""
+
+        deadline = (
+            time.monotonic()
+            + self.failure_recovery['scan_wait_timeout_sec']
+        )
+        while rclpy.ok() and time.monotonic() < deadline:
+            scan = self._get_fresh_recovery_scan()
+            if scan is not None:
+                return scan
+            rclpy.spin_once(self, timeout_sec=0.05)
+        return None
+
+    def _rear_sector_clearance(self, scan, turn_direction):
+        """Return minimum range and sample count in one rear quadrant."""
+
+        center_deg = -135.0 if turn_direction == 'right' else 135.0
+        center_rad = math.radians(center_deg)
+        half_angle_rad = math.radians(
+            self.failure_recovery['rear_sector_half_angle_deg']
+        )
+        valid_ranges = []
+
+        for index, measured_range in enumerate(scan.ranges):
+            angle = scan.angle_min + index * scan.angle_increment
+            angle_delta = math.atan2(
+                math.sin(angle - center_rad),
+                math.cos(angle - center_rad),
+            )
+            if abs(angle_delta) > half_angle_rad:
+                continue
+
+            measured_range = float(measured_range)
+            if math.isinf(measured_range) and measured_range > 0.0:
+                if math.isfinite(scan.range_max) and scan.range_max > 0.0:
+                    valid_ranges.append(float(scan.range_max))
+                continue
+            if not math.isfinite(measured_range):
+                continue
+            if measured_range < scan.range_min:
+                continue
+            if scan.range_max > 0.0 and measured_range > scan.range_max:
+                continue
+            valid_ranges.append(measured_range)
+
+        if not valid_ranges:
+            return 0.0, 0
+        return min(valid_ranges), len(valid_ranges)
 
     def _cancel_goal_after_early_qr(
             self, waypoint_name, goal_handle, result_future):
@@ -558,6 +1019,15 @@ class NavCruise(Node):
         """Execute optional open-loop straight or arc waypoint motions."""
 
         waypoint = self.waypoints[waypoint_name]
+        motion_sequence = waypoint.get('post_arrival_motion_sequence')
+        if motion_sequence is not None:
+            self._execute_post_arrival_motion_sequence(
+                waypoint_name,
+                waypoint,
+                motion_sequence,
+            )
+            return
+
         forward_distance_m = float(
             waypoint.get('post_arrival_forward_distance_m', 0.0)
         )
@@ -717,6 +1187,184 @@ class NavCruise(Node):
                 'POST_MOTION_RETURN_TURN_ARC',
             )
 
+    def _execute_post_arrival_motion_sequence(
+            self, waypoint_name, waypoint, motion_sequence):
+        """Validate and execute a parameterized open-loop motion sequence."""
+
+        if not isinstance(motion_sequence, list):
+            raise RuntimeError(
+                f'航点 {waypoint_name} 的 post_arrival_motion_sequence '
+                '必须是列表'
+            )
+        if not motion_sequence:
+            return
+
+        normalized_steps = []
+        for index, raw_step in enumerate(motion_sequence, start=1):
+            if not isinstance(raw_step, dict):
+                raise RuntimeError(
+                    f'航点 {waypoint_name} 的动作序列第{index}步必须是字典'
+                )
+
+            motion_type = str(raw_step.get('type', '')).lower()
+            motion_name = str(
+                raw_step.get('name', f'动作序列第{index}步')
+            )
+
+            if motion_type == 'arc':
+                radius_m = self._positive_motion_value(
+                    raw_step.get('radius_m'),
+                    waypoint_name,
+                    index,
+                    'radius_m',
+                )
+                angle_deg = self._positive_motion_value(
+                    raw_step.get('angle_deg'),
+                    waypoint_name,
+                    index,
+                    'angle_deg',
+                )
+                speed_mps = self._positive_motion_value(
+                    raw_step.get('speed_mps'),
+                    waypoint_name,
+                    index,
+                    'speed_mps',
+                )
+                travel_direction = str(
+                    raw_step.get('travel_direction', 'forward')
+                ).lower()
+                turn_direction = str(
+                    raw_step.get('turn_direction', '')
+                ).lower()
+                if travel_direction not in ('forward', 'reverse'):
+                    raise RuntimeError(
+                        f'航点 {waypoint_name} 的动作序列第{index}步 '
+                        f'travel_direction 不支持: {travel_direction}'
+                    )
+                if turn_direction not in ('left', 'right'):
+                    raise RuntimeError(
+                        f'航点 {waypoint_name} 的动作序列第{index}步 '
+                        f'turn_direction 不支持: {turn_direction}'
+                    )
+                normalized_steps.append({
+                    'type': 'arc',
+                    'name': motion_name,
+                    'radius_m': radius_m,
+                    'duration_sec': (
+                        math.radians(angle_deg) * radius_m / speed_mps
+                    ),
+                    'speed_mps': (
+                        speed_mps
+                        if travel_direction == 'forward'
+                        else -speed_mps
+                    ),
+                    'turn_direction': turn_direction,
+                })
+            elif motion_type == 'linear':
+                distance_m = self._positive_motion_value(
+                    raw_step.get('distance_m'),
+                    waypoint_name,
+                    index,
+                    'distance_m',
+                )
+                speed_mps = self._positive_motion_value(
+                    raw_step.get('speed_mps'),
+                    waypoint_name,
+                    index,
+                    'speed_mps',
+                )
+                travel_direction = str(
+                    raw_step.get('travel_direction', 'forward')
+                ).lower()
+                if travel_direction not in ('forward', 'reverse'):
+                    raise RuntimeError(
+                        f'航点 {waypoint_name} 的动作序列第{index}步 '
+                        f'travel_direction 不支持: {travel_direction}'
+                    )
+                normalized_steps.append({
+                    'type': 'linear',
+                    'name': motion_name,
+                    'distance_m': distance_m,
+                    'speed_mps': (
+                        speed_mps
+                        if travel_direction == 'forward'
+                        else -speed_mps
+                    ),
+                })
+            elif motion_type == 'stop':
+                duration_sec = self._positive_motion_value(
+                    raw_step.get('duration_sec'),
+                    waypoint_name,
+                    index,
+                    'duration_sec',
+                )
+                normalized_steps.append({
+                    'type': 'stop',
+                    'name': motion_name,
+                    'duration_sec': duration_sec,
+                })
+            else:
+                raise RuntimeError(
+                    f'航点 {waypoint_name} 的动作序列第{index}步 '
+                    f'type 不支持: {motion_type}'
+                )
+
+        settle_sec = max(
+            0.0,
+            float(waypoint.get('post_arrival_settle_sec', 1.2)),
+        )
+        self._wait_for_motion_channel_settle(waypoint_name, settle_sec)
+        self.get_logger().info(
+            f'航点 {waypoint_name} 开始执行参数化动作序列，'
+            f'共{len(normalized_steps)}步'
+        )
+
+        for index, step in enumerate(normalized_steps, start=1):
+            state_name = (
+                f'POST_MOTION_SEQUENCE_{index}_{step["type"].upper()}'
+            )
+            if step['type'] == 'arc':
+                self._execute_open_loop_arc_motion(
+                    waypoint_name,
+                    step['name'],
+                    step['speed_mps'],
+                    step['radius_m'],
+                    step['duration_sec'],
+                    step['turn_direction'],
+                    state_name,
+                )
+            elif step['type'] == 'linear':
+                self._execute_open_loop_linear_motion(
+                    waypoint_name,
+                    step['name'],
+                    step['distance_m'],
+                    step['speed_mps'],
+                )
+            else:
+                self._hold_motion_stop(
+                    waypoint_name,
+                    step['duration_sec'],
+                    step['name'],
+                )
+
+    @staticmethod
+    def _positive_motion_value(value, waypoint_name, index, field_name):
+        """Return a positive finite sequence value or raise a safe error."""
+
+        try:
+            parsed_value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f'航点 {waypoint_name} 的动作序列第{index}步 '
+                f'{field_name} 必须是数字'
+            ) from exc
+        if not math.isfinite(parsed_value) or parsed_value <= 0.0:
+            raise RuntimeError(
+                f'航点 {waypoint_name} 的动作序列第{index}步 '
+                f'{field_name} 必须是大于0的有限数'
+            )
+        return parsed_value
+
     def execute_qr_post_detection_motion(self):
         """Execute the configured motion after a valid QR signal."""
 
@@ -865,7 +1513,8 @@ class NavCruise(Node):
 
         self._publish_motion_stop()
 
-    def _hold_motion_stop(self, waypoint_name, pause_sec):
+    def _hold_motion_stop(
+            self, waypoint_name, pause_sec, motion_name='换向停车'):
         """Hold zero velocity before changing travel direction."""
 
         if pause_sec <= 0.0:
@@ -873,8 +1522,8 @@ class NavCruise(Node):
 
         self._publish_state('POST_MOTION_DIRECTION_CHANGE_PAUSE')
         self.get_logger().info(
-            f'航点 {waypoint_name} 前进结束，保持零速 '
-            f'{pause_sec:.2f}s 后再后退'
+            f'航点 {waypoint_name} 执行{motion_name}: '
+            f'保持零速 {pause_sec:.2f}s'
         )
         stop_msg = Twist()
         end_time = time.monotonic() + pause_sec
@@ -979,6 +1628,13 @@ class NavCruise(Node):
                 '最小自动巡航完成: P -> ' + ' -> '.join(route)
             )
 
+        except EmergencyReturnCompleted as exc:
+            self.get_logger().warn(str(exc))
+            self.publish_stop()
+            self._publish_state('EMERGENCY_RETURN_COMPLETE')
+            self.get_logger().warn(
+                '自动巡航因中途导航失败提前结束，但小车已返回P点'
+            )
         except Exception as exc:
             self.get_logger().error(f'最小自动巡航失败: {exc}')
             self.publish_stop()

@@ -214,14 +214,17 @@ AMCL 不激活和 `map` 帧缺失。
  **AMCL**（`nav2_params.yaml` → `amcl`）:
  - 定位模型: likelihood_field（室内环境优于 beam 模型）
  - 粒子数: 500~2000（RDK X5 性能上限）
- - 激光范围: min 0.12m / max 10.0m（适配 N10）
+ - 激光范围: min 0.12m / max 5.0m（按约5m × 5m比赛地图限制 AMCL 远场量测）
  - 坐标系: global_frame=map, base_frame=base_footprint
  
 **Controller**（`nav2_params.yaml` → `controller_server.FollowPath`）:
  - 控制器类型: RegulatedPurePursuitController（非完整约束 / 阿克曼适配）
- - 调试巡航速度: `desired_linear_vel=0.10 m/s`，速度平滑上限 `0.12 m/s`
- - 稳定后比赛巡航候选: `0.18~0.20 m/s`
+ - 当前比赛巡航速度: `desired_linear_vel=0.25m/s`，速度平滑前进上限同为 `0.25m/s`
+ - 当前近场响应档：local costmap `update_frequency=10Hz`，RPP碰撞预测时间
+   `max_allowed_time_to_collision_up_to_carrot=1.5s`；障碍距离降速暂时保持关闭，
+   两棵安全BT仍以 `0.333Hz`（约3秒）进行全局重规划
  - 预瞄距离: `lookahead_dist=0.35m`，动态范围 `0.35~0.70m`，`lookahead_time=0.4`
+ - 到点最低接近速度: `min_approach_linear_velocity=0.08m/s`；若实测过冲或前后来回，回退到 `0.05~0.06m/s`
  - 碰撞检测: 开启
  - 当前 RPP 稳定跟踪档：`regulated_linear_scaling_min_radius=0.4`、`regulated_linear_scaling_min_speed=0.08`、`max_angular_accel=1.5`
  - R11 起主路径允许低速规划倒车：`allow_reversing: true`
@@ -242,8 +245,8 @@ AMCL 不激活和 `map` 帧缺失。
   倒车允许但代价更高，优先前进并减少频繁前后换向。
  
 **Costmap**（`nav2_params.yaml` → local_costmap / global_costmap）:
- - 局部 costmap: 3m × 3m 滚动窗口，跟随 odom_combined
- - 全局 costmap: 30m × 30m 静态 + 动态障碍
+ - 局部 costmap: 4m × 4m 滚动窗口，使用 `odom` 坐标系并以小车为中心
+ - 全局 costmap: 10m × 10m 配置尺寸，静态层通常按实际约5m × 5m地图重设主地图
  - footprint: [[-0.15,-0.105],[-0.15,0.105],[0.15,0.105],[0.15,-0.105]]
    （实车 0.28m × 0.185m 外廓加约 1cm 余量）
  - R28 后膨胀半径当前值: 局部 0.25m / 全局 0.30m，
@@ -316,7 +319,13 @@ ros2 launch dg_pkg dg_nav2.launch.py \
  - 封装 Nav2 导航接口（action: navigate_to_pose）
  - 航点和执行顺序由 `competition_params.yaml` 的 `waypoints` 与
    `routes.route_minimal` 配置；增加普通 Nav2 中间点不改代码
+ - waypoint 可选 `yaw_goal_tolerance`（弧度）覆盖普通航点默认角度容差；
+   当前 `qr_stop=0.261799rad`（15°），其他普通点保持0.45rad，
+   `ignore_yaw=true` 的 `p_return` 仍使用3.14rad
  - waypoint 可选到点动作接口同时兼容直线与定半径弧线：
+   首选 `post_arrival_motion_sequence` 列表，按顺序组合 `arc`、`linear`、
+   `stop`；代码会在开始运动前验证整条序列，任一步参数非法则不发运动指令。
+   旧版单段接口继续兼容：
    `post_arrival_settle_sec`、`post_arrival_forward_distance_m`、
    `post_arrival_forward_speed_mps`、`post_arrival_reverse_distance_m`、
    `post_arrival_reverse_speed_mps`、`post_arrival_turn_radius_m`、
@@ -331,16 +340,25 @@ ros2 launch dg_pkg dg_nav2.launch.py \
  - `qr.skip_qr_goal_on_signal=false`：必须先到固定 QR 点并识别有效二维码，再按
    `qr.post_detection_motion` 执行半径 0.35m、速度 0.20m/s 的右后弧倒车
    100°，替代原 `return_mid_after_qr` Nav2 过渡点。
- - 到达通道前点后，先以半径 0.35m、速度 0.20m/s 右转 30°（约0.92s），
-   再直行前进 1.00m@0.25m/s、保持零速 1.0s、直行后退
-   1.00m@0.25m/s，最后沿同一右转弧线倒车30°，理论上回到转向前。
+ - 到达通道前点后执行8步开环调头：右前弧20°@0.20m/s、直行
+   1.15m@0.50m/s、左前弧90°@0.20m/s、零速0.5s、直退1.00m@0.25m/s、
+   零速0.5s、第二次左前弧110°、调头后直行1.15m@0.50m/s。弧线半径均为0.35m；
+   两次左弧合计200°，计入最初右前弧20°后相对航点到达朝向理论净左转180°。
+ - 所有Nav2航点使用有界失败恢复：普通航点失败后，只有在`/scan`新鲜且对应
+   后方扇区净空不少于0.45m时，才以0.08m/s、半径0.35m后退弧转30°并重试
+   原目标1次；倒车过程中净空小于0.30m或scan过期立即停车。
+ - 普通航点重试仍失败时，中止后续任务并紧急导航到`p_return`；`p_return`
+   自身最多执行2次受控脱困，方向按右、左轮换。成功紧急回P发布
+   `EMERGENCY_RETURN_COMPLETE`，不会误报整条任务正常完成；目标状态未确认停止时
+   禁止直接发布恢复速度。
  - 航点坐标实测后填入 `competition_params.yaml`
  - 导航参数（教程推荐）：
    - 最大线速度: 0.3 m/s，最大角速度: 0.5 rad/s
    - 阿克曼转弯半径: 0.25m，轴距: 0.25m
    - 目标精度: xy 5cm, yaw 5.7度，障碍物膨胀半径: 15cm
    - 到达判定: < arrival_distance（默认 0.3m）
- - 导航超时处理：超过 nav_timeout（默认 120s）触发重试
+ - 导航超时处理：超过`nav_timeout_sec`（当前90s）先取消目标并确认Nav2停止，
+   再按上述后方净空规则脱困；无法确认目标停止时只停车，不执行开环恢复
  
  ### 3.3 [M3] 黄色通道巡线 -- lane_patrol.py
  
