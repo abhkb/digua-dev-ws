@@ -70,13 +70,16 @@ def generate_launch_description():
     )
     declare_qr_wait_timeout_sec = DeclareLaunchArgument(
         'qr_wait_timeout_sec',
-        default_value='60.0',
+        default_value='120.0',
         description='到达 QR 点后等待二维码方向信号的超时时间，0 表示不超时',
     )
     declare_start_delay_sec = DeclareLaunchArgument(
         'start_delay_sec',
         default_value='-1.0',
-        description='Nav2 就绪并发布 initialpose 后，等待多少秒再发送第一个导航目标；-1 表示使用 competition_params.yaml',
+        description=(
+            'Nav2 就绪并发布 initialpose 后，等待多少秒再发送第一个导航目标；'
+            '-1 表示使用 competition_params.yaml'
+        ),
     )
 
     qrcode_detector = Node(

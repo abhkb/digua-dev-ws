@@ -44,7 +44,7 @@ dg_competition:
       description: "返回 P 点 / 停车点"
       ignore_yaw: true
       post_arrival_forward_distance_m: 0.15
-      post_arrival_forward_speed_mps: 0.05
+      post_arrival_forward_speed_mps: 0.15
       x: 0.047047394274798364
       y: -0.0013009601122881778
       z: 0.0
@@ -62,48 +62,36 @@ dg_competition:
       # 开环动作按列表顺序执行；所有弧线半径均取安全值0.35m。
       post_arrival_motion_sequence:
         - type: "arc"
-          name: "右前弧转20度"
+          name: "右前弧转25度"
           travel_direction: "forward"
           turn_direction: "right"
           radius_m: 0.35
-          angle_deg: 20.0
+          angle_deg: 25.0
           speed_mps: 0.20
         - type: "linear"
-          name: "直行前进1.15米"
+          name: "直行前进1.00米"
           travel_direction: "forward"
-          distance_m: 1.15
-          speed_mps: 0.50
-        - type: "arc"
-          name: "第一次左前弧转90度"
-          travel_direction: "forward"
-          turn_direction: "left"
-          radius_m: 0.35
-          angle_deg: 90.0
-          speed_mps: 0.20
+          distance_m: 1.00
+          speed_mps: 1.20
         - type: "stop"
           name: "前进切换后退停车"
           duration_sec: 0.5
         - type: "linear"
-          name: "直线后退1.00米"
+          name: "直线后退1.15米"
           travel_direction: "reverse"
-          distance_m: 1.00
-          speed_mps: 0.25
+          distance_m: 1.15
+          speed_mps: 1.00
         - type: "stop"
           name: "后退切换前进停车"
           duration_sec: 0.5
         - type: "arc"
-          name: "第二次左前弧转110度"
-          travel_direction: "forward"
-          turn_direction: "left"
+          name: "右后弧转40度"
+          travel_direction: "reverse"
+          turn_direction: "right"
           radius_m: 0.35
-          angle_deg: 110.0
+          angle_deg: 40.0
           speed_mps: 0.20
-        - type: "linear"
-          name: "调头后直行前进1.15米"
-          travel_direction: "forward"
-          distance_m: 1.15
-          speed_mps: 0.50
-      x: 2.2959826696340824
+      x: 2.1959826696340824
       y: 1.6753652565703052
       z: 0.0
       yaw: 2.433013
@@ -168,6 +156,8 @@ dg_competition:
   qr:
     clockwise_signal: 3
     anticlockwise_signal: 4
+    # 等待二维码超过launch参数qr_wait_timeout_sec后，不进入ERROR，继续后续路线。
+    continue_on_timeout: true
     # 必须先到达固定 QR 点再执行扫码后的右后弧倒车。
     skip_qr_goal_on_signal: false
     post_detection_motion:

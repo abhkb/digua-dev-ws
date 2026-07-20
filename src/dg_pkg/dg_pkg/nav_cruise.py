@@ -74,7 +74,7 @@ class NavCruise(Node):
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('start_delay_sec', -1.0)
-        self.declare_parameter('qr_wait_timeout_sec', 60.0)
+        self.declare_parameter('qr_wait_timeout_sec', 120.0)
         self.declare_parameter('action_server_timeout_sec', 20.0)
         self.declare_parameter('stop_cmd_count', 10)
         self.declare_parameter('stop_cmd_interval_sec', 0.1)
@@ -145,6 +145,9 @@ class NavCruise(Node):
         )
         self.skip_qr_goal_on_signal = bool(
             self.qr_config.get('skip_qr_goal_on_signal', True)
+        )
+        self.qr_continue_on_timeout = bool(
+            self.qr_config.get('continue_on_timeout', True)
         )
 
         self.latest_qr_signal = None
@@ -1557,7 +1560,8 @@ class NavCruise(Node):
         self.get_logger().info(
             f'等待二维码方向信号 {self.clockwise_signal}/'
             f'{self.anticlockwise_signal}，超时 '
-            f'{self.qr_wait_timeout_sec:.1f}s'
+            f'{self.qr_wait_timeout_sec:.1f}s，'
+            f'超时继续={self.qr_continue_on_timeout}'
         )
 
         start_time = time.monotonic()
@@ -1570,6 +1574,13 @@ class NavCruise(Node):
             elapsed = time.monotonic() - start_time
             if self.qr_wait_timeout_sec > 0.0:
                 if elapsed > self.qr_wait_timeout_sec:
+                    if self.qr_continue_on_timeout:
+                        self._publish_state('QR_TIMEOUT_CONTINUE')
+                        self.get_logger().warn(
+                            '等待二维码方向信号超时，未取得有效3/4；'
+                            '按配置继续执行二维码后动作和后续路线'
+                        )
+                        return None
                     raise RuntimeError('等待二维码方向信号超时')
 
             rclpy.spin_once(self, timeout_sec=0.1)

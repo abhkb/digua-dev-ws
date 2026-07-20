@@ -56,6 +56,9 @@ competition_test*/
 # Keep YAML and source configs tracked; ignore generated map images by default.
 *.pgm
 
+# Local source snapshots; keep them outside the public Git history.
+src/*.zip
+
 # OS/editor noise
 .DS_Store
 Thumbs.db
